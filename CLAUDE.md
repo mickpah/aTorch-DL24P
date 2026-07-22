@@ -17,34 +17,37 @@ aTorch DL24P Control is a PySide6 GUI application for controlling the aTorch DL2
 
 ## Environment
 
-Activate the virtual environment before running anything:
+The project uses `uv` for dependency management (`pyproject.toml` + `uv.lock`; `.venv` is uv-managed). `requirements.txt` is legacy — add dependencies to `pyproject.toml` and run `uv sync`.
 
 ```bash
-source .venv/bin/activate
+# Install/update dependencies (including pytest via the dev extra)
+uv sync --extra dev
 ```
 
 ## Commands
 
+A `justfile` wraps the common tasks — `just` lists them (`just run`, `just viewer`, `just test`, `just test-file test_protocol`, `just build`, `just sync`, `just log`). Raw equivalents:
+
 ```bash
 # Run the application (Test Bench - device control + testing)
-python -m load_test_bench.main
+uv run python -m load_test_bench.main
 
 # Run the Test Viewer (standalone, no device needed)
-python -m load_test_bench.viewer
+uv run python -m load_test_bench.viewer
 
 # Run all tests
-pytest
+uv run --extra dev pytest
 
 # Run a single test file
-pytest tests/test_protocol.py
+uv run --extra dev pytest tests/test_protocol.py
 
 # Run with verbose output
-pytest -v
+uv run --extra dev pytest -v
 ```
 
 ## Launching the App
 
-**IMPORTANT**: When launching the app (`python -m load_test_bench.main` or `python -m load_test_bench.viewer`):
+**IMPORTANT**: When launching the app (`uv run python -m load_test_bench.main` or `uv run python -m load_test_bench.viewer`):
 1. **Kill previous instance first**: Before launching, find and kill any previous instance that you launched. Use the background task ID from the previous launch to stop it — do NOT do a blanket `pkill python` or similar, as the user may have other Python processes running.
 2. **Run in background**: Always launch the app non-blocking (using `run_in_background`) so the user can continue interacting with you while the app is running.
 
@@ -291,7 +294,7 @@ The Test Automation panel uses a custom collapse approach:
 Build script: `build.py` using `run_load_test_bench.py` as entry point (handles frozen imports).
 
 ```bash
-python build.py  # Creates dist/Load Test Bench.app (macOS) or .exe (Windows)
+uv run python build.py  # Creates dist/Load Test Bench.app (macOS) or .exe (Windows)
 ```
 
 Hidden imports required: PySide6, pyqtgraph, numpy, pandas, serial, hid
@@ -383,12 +386,11 @@ The GUI was freezing after ~1-1.5 hours of continuous test running. User reporte
 
 ### Key Code Locations
 
-- `main_window.py:95` - `_processing_status` flag initialization
-- `main_window.py:988-992` - Signal queue prevention in `_on_device_status`
-- `main_window.py:1014-1022` - `_update_ui_status` wrapper with try/finally
-- `main_window.py:1039-1044` - Periodic database commit logic
-- `database.py:149-185` - Modified `add_reading()` with optional commit
-- `device.py:591` - `POLL_INTERVAL = 1.0`
+(Search by symbol name — line numbers drift as `main_window.py` grows.)
+
+- `main_window.py` - `_processing_status` flag (set in `__init__`), signal queue prevention in `_on_device_status()`, try/finally wrapper in `_update_ui_status()`, periodic commit via `_last_db_commit_time`
+- `database.py` - `add_reading(..., commit=False)` and `commit()` method
+- `device.py` - `USBHIDDevice.POLL_INTERVAL = 1.0`
 
 ### Testing Status
 
@@ -410,11 +412,11 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 ## Test Coverage
 
 118 tests total across 6 test files:
-- `test_protocol.py` (38) - Atorch protocol encoding/decoding
+- `test_protocol.py` (14) - Atorch protocol encoding/decoding
 - `test_database.py` (13) - SQLite operations and models
-- `test_profiles.py` (12) - Test profile serialization
+- `test_profiles.py` (11) - Test profile serialization
 - `test_alerts.py` (30) - Alert conditions (voltage, temp, capacity, etc.)
-- `test_export.py` (19) - CSV and JSON export
-- `test_px100_protocol.py` (31) - PX100 protocol commands/parsing
+- `test_export.py` (20) - CSV and JSON export
+- `test_px100_protocol.py` (30) - PX100 protocol commands/parsing
 
-Run with: `pytest -v`
+Run with: `uv run --extra dev pytest -v`
