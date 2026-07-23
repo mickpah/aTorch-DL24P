@@ -53,6 +53,7 @@ from .debug_window import DebugWindow
 from .database_dialog import DatabaseDialog
 from .battery_load_panel import BatteryLoadPanel
 from .power_bank_panel import PowerBankPanel
+from .dp832a_charger_panel import DP832AChargerPanel
 from .charger_panel import ChargerPanel
 from .battery_charger_panel import BatteryChargerPanel
 
@@ -475,6 +476,12 @@ class MainWindow(QMainWindow):
         self.battery_charger_panel = BatteryChargerPanel()
         charger_idx = self.bottom_tabs.addTab(self.battery_charger_panel, "Battery Charger Output")
         self.bottom_tabs.setTabToolTip(charger_idx, "Monitor and log battery charging sessions")
+
+        self.dp832a_charger_panel = DP832AChargerPanel()
+        dp832a_idx = self.bottom_tabs.addTab(self.dp832a_charger_panel, "Battery Charging")
+        self.bottom_tabs.setTabToolTip(
+            dp832a_idx, "Charge a battery using a Rigol DP832A power supply (LAN)"
+        )
 
         # Track WIP tabs so they stay disabled at all times
         self._wip_tab_indices = set()
@@ -4195,6 +4202,8 @@ class MainWindow(QMainWindow):
             self._db_writer_thread.join(timeout=2.0)
         except:
             pass
+
+        self.dp832a_charger_panel.shutdown()
 
         if self.device:
             self.device.disconnect()

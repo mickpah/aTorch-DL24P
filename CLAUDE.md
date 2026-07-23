@@ -125,7 +125,7 @@ When loading test data from the History panel, the graph axes should be configur
 
 **Future Test Types:**
 As new test panels are implemented, add their graph configurations here:
-- Battery Charger: TBD
+- Battery Charging (DP832A): no graph in v1 (live readout only)
 - Charger Load: TBD
 - Power Bank Capacity: TBD
 
@@ -139,6 +139,26 @@ Implementation: See `_on_history_json_selected()` and `_load_battery_load_histor
 - Time limit (hours/minutes)
 
 Profiles saved as JSON in `profiles/` directory.
+
+### Rigol DP832A Charger (LAN)
+
+The "Battery Charging" tab charges a battery from a Rigol DP832A bench supply
+over its LAN interface (raw SCPI on TCP port 5555, stdlib socket - no VISA).
+
+- `protocol/dp832a_protocol.py` - pure SCPI build/parse (`DP832AProtocol`),
+  `ChargerStatus` dataclass, `CHANNEL_LIMITS` (CH1/CH2: 32 V/3.2 A, CH3: 5.3 V/3.2 A)
+- `protocol/rigol_dp832a.py` - `RigolDP832A` transport: 1 Hz poll thread,
+  `GUI_LOCK_TIMEOUT` on commands, status/error callbacks (poll thread - GUI
+  consumers must marshal through a Qt Signal)
+- `automation/charge_monitor.py` - `ChargeMonitor`: CC-CV termination
+  (complete when CV-mode current stays below the cutoff for 5 consecutive
+  samples), safety timeout, fault on unexpected output-off
+- `gui/dp832a_charger_panel.py` - self-contained panel that OWNS its charger
+  device (unlike the DL24 panels, it does not use `MainWindow.device`);
+  `MainWindow` only adds the tab and calls `panel.shutdown()` in `closeEvent`
+- OVP is set automatically to charge voltage + 0.1 V at charge start
+- Session file: `sessions/dp832a_charger_session.json` (host, port, channel,
+  setpoints)
 
 ## Key Files
 
@@ -411,12 +431,15 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 
 ## Test Coverage
 
-118 tests total across 6 test files:
+150 tests total across 9 test files:
 - `test_protocol.py` (14) - Atorch protocol encoding/decoding
 - `test_database.py` (13) - SQLite operations and models
 - `test_profiles.py` (11) - Test profile serialization
 - `test_alerts.py` (30) - Alert conditions (voltage, temp, capacity, etc.)
 - `test_export.py` (20) - CSV and JSON export
 - `test_px100_protocol.py` (30) - PX100 protocol commands/parsing
+- `test_dp832a_protocol.py` (17) - DP832A SCPI build/parse
+- `test_rigol_dp832a.py` (7) - DP832A LAN driver (fake socket)
+- `test_charge_monitor.py` (8) - CC-CV charge termination state machine
 
 Run with: `uv run --extra dev pytest -v`
