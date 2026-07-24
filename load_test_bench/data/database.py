@@ -9,6 +9,74 @@ import json
 from .models import TestSession, Reading
 
 
+def _migration_1_job_ledger(conn: sqlite3.Connection) -> None:
+    """Job ledger tables and session/reading state columns.
+
+    First installment of the Database Schema Overhaul (see
+    docs/superpowers/specs/2026-07-24-job-engine-design.md).
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            state TEXT NOT NULL DEFAULT 'PENDING',
+            job_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            spec_json TEXT NOT NULL,
+            current_phase_index INTEGER NOT NULL DEFAULT 0,
+            heartbeat_at TEXT,
+            fault_reason TEXT,
+            schedule_id INTEGER REFERENCES scheduled_jobs(id),
+            battery_name TEXT DEFAULT '',
+            notes TEXT DEFAULT ''
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE job_phases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL REFERENCES jobs(id),
+            phase_index INTEGER NOT NULL,
+            phase_type TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'PENDING',
+            started_at TEXT,
+            finished_at TEXT,
+            session_id INTEGER REFERENCES sessions(id),
+            result_json TEXT,
+            UNIQUE (job_id, phase_index)
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX idx_job_phases_job ON job_phases(job_id)")
+    cursor.execute(
+        """
+        CREATE TABLE scheduled_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            next_run_at TEXT NOT NULL,
+            repeat_interval_s INTEGER,
+            grace_window_s INTEGER NOT NULL DEFAULT 3600,
+            spec_json TEXT NOT NULL,
+            last_run_job_id INTEGER REFERENCES jobs(id)
+        )
+        """
+    )
+    cursor.execute(
+        "ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+    )
+    cursor.execute("ALTER TABLE sessions ADD COLUMN job_phase_id INTEGER")
+    cursor.execute("ALTER TABLE readings ADD COLUMN aux_voltage_v REAL")
+
+
+_MIGRATIONS = [_migration_1_job_ledger]
+
+
 class Database:
     """SQLite database for storing test sessions and readings."""
 
@@ -77,6 +145,15 @@ class Database:
         """)
 
         self._conn.commit()
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        """Apply pending schema migrations, tracked via PRAGMA user_version."""
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        for index in range(version, len(_MIGRATIONS)):
+            _MIGRATIONS[index](self._conn)
+            self._conn.execute(f"PRAGMA user_version = {index + 1}")
+            self._conn.commit()
 
     def close(self) -> None:
         """Close database connection."""
@@ -145,6 +222,41 @@ class Database:
                 session.settings_json(),
                 session.id,
             ),
+        )
+        self._conn.commit()
+
+    def find_open_session_ids(self) -> list[int]:
+        """Sessions never finalized (end_time NULL) - crash orphans."""
+        cursor = self._conn.execute("SELECT id FROM sessions WHERE end_time IS NULL")
+        return [row[0] for row in cursor.fetchall()]
+
+    def close_session_as_interrupted(self, session_id: int) -> None:
+        """Finalize an orphaned session: end_time = last reading (or start_time)."""
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT MAX(timestamp) FROM readings WHERE session_id = ?", (session_id,)
+        )
+        end_time = cursor.fetchone()[0]
+        if end_time is None:
+            cursor.execute("SELECT start_time FROM sessions WHERE id = ?", (session_id,))
+            row = cursor.fetchone()
+            end_time = row[0] if row else datetime.now().isoformat()
+        cursor.execute(
+            "UPDATE sessions SET end_time = ?, status = 'interrupted' WHERE id = ?",
+            (end_time, session_id),
+        )
+        self._conn.commit()
+
+    def set_session_status(self, session_id: int, status: str) -> None:
+        self._conn.execute(
+            "UPDATE sessions SET status = ? WHERE id = ?", (status, session_id)
+        )
+        self._conn.commit()
+
+    def link_session_to_phase(self, session_id: int, job_phase_id: int) -> None:
+        self._conn.execute(
+            "UPDATE sessions SET job_phase_id = ? WHERE id = ?",
+            (job_phase_id, session_id),
         )
         self._conn.commit()
 
