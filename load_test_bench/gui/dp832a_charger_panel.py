@@ -181,6 +181,7 @@ class DP832AChargerPanel(QWidget):
     def _on_connect_clicked(self) -> None:
         if self.charger.is_connected:
             self._stop_if_charging()
+            self._output_off_retry_timer.stop()
             self.charger.disconnect()
             self._set_connected_ui(False)
             return
@@ -215,6 +216,7 @@ class DP832AChargerPanel(QWidget):
         if not self.charger.is_connected:
             QMessageBox.warning(self, "Charger", "Connect to the DP832A first.")
             return
+        self._output_off_retry_timer.stop()
         volts = self.voltage_spin.value()
         amps = self.current_spin.value()
         ok = (
@@ -305,12 +307,15 @@ class DP832AChargerPanel(QWidget):
         return self._attempt_output_off()
 
     def _attempt_output_off(self) -> bool:
+        if not self.charger.is_connected:
+            return False
         self._output_off_attempts += 1
         if self.charger.output_off():
             if self._output_off_attempts > 1:
                 self.state_label.setText(f"{self.state_label.text()} (output off after retry)")
             return True
-        if not self.charger.is_connected or self._output_off_attempts >= MAX_OUTPUT_OFF_RETRIES:
+        if self._output_off_attempts >= MAX_OUTPUT_OFF_RETRIES:
+            self.state_label.setText("WARNING: could not turn charger output off - turn the channel off on the instrument front panel")
             return False
         self.state_label.setText(
             "WARNING: failed to turn charger output off - retrying... "
