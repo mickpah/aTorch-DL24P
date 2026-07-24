@@ -1,22 +1,18 @@
-"""Rigol DP832A power supply driver - raw SCPI over LAN (TCP port 5555).
+"""Rigol DP832A power supply driver - SCPI over LAN via ScpiTransport.
 
-Mirrors the structure of USBHIDDevice in device.py: a daemon thread polls the
-instrument every POLL_INTERVAL and pushes ChargerStatus snapshots to a
-callback; commands from the GUI acquire the lock with a timeout so a slow
-network can never freeze the UI (see CLAUDE.md "Lock Timeout for GUI
-Operations"). The status callback runs on the poll thread - GUI consumers
-must marshal it through a Qt Signal.
+The generic plumbing (socket, framing, lock-timeout commands, poll thread,
+stale-status invalidation) lives in scpi_transport.py; this class supplies
+only DP832A-specific SCPI strings and status parsing. Status callbacks fire
+on the poll thread - GUI consumers must marshal through a Qt Signal.
 """
 
-import socket
-import threading
-import time
 from typing import Callable, Optional
 
 from .dp832a_protocol import ChargerStatus, DP832AProtocol
+from .scpi_transport import LanScpiLink, ScpiError, ScpiTransport
 
 
-class ChargerError(Exception):
+class ChargerError(ScpiError):
     """Raised on DP832A connection or identification failures."""
 
 
@@ -26,22 +22,19 @@ class RigolDP832A:
     SOCKET_TIMEOUT = 2.0  # seconds
     GUI_LOCK_TIMEOUT = 1.0  # seconds
 
-    def __init__(self) -> None:
-        self._sock: Optional[socket.socket] = None
-        self._connected = False
-        self._host: Optional[str] = None
+    def __init__(self, transport: Optional[ScpiTransport] = None) -> None:
+        # transport injection is a test seam; connect() builds a LAN one.
+        self._transport = transport
         self._channel = 1
-        self._identity = ""
-        self._lock = threading.Lock()
-        self._running = False
-        self._poll_thread: Optional[threading.Thread] = None
-        self._last_status: Optional[ChargerStatus] = None
+        self._host: Optional[str] = None
         self._status_callback: Optional[Callable[[ChargerStatus], None]] = None
         self._error_callback: Optional[Callable[[str], None]] = None
+        if transport is not None:
+            self._apply_callbacks()
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return self._transport.is_connected if self._transport else False
 
     @property
     def host(self) -> Optional[str]:
@@ -49,7 +42,7 @@ class RigolDP832A:
 
     @property
     def identity(self) -> str:
-        return self._identity
+        return self._transport.identity if self._transport else ""
 
     @property
     def channel(self) -> int:
@@ -57,7 +50,7 @@ class RigolDP832A:
 
     @property
     def last_status(self) -> Optional[ChargerStatus]:
-        return self._last_status
+        return self._transport.last_status if self._transport else None
 
     def set_channel(self, channel: int) -> None:
         DP832AProtocol.check_channel(channel)
@@ -65,43 +58,35 @@ class RigolDP832A:
 
     def set_status_callback(self, callback: Callable[[ChargerStatus], None]) -> None:
         self._status_callback = callback
+        self._apply_callbacks()
 
     def set_error_callback(self, callback: Callable[[str], None]) -> None:
         self._error_callback = callback
+        self._apply_callbacks()
 
     def connect(self, host: str, port: int = DEFAULT_PORT) -> bool:
-        if self._connected:
+        if self.is_connected:
             return True
+        transport = self._transport or ScpiTransport(
+            LanScpiLink(host, port, timeout=self.SOCKET_TIMEOUT),
+            poll_interval=self.POLL_INTERVAL,
+            lock_timeout=self.GUI_LOCK_TIMEOUT,
+        )
         try:
-            sock = socket.create_connection((host, port), timeout=self.SOCKET_TIMEOUT)
-            sock.settimeout(self.SOCKET_TIMEOUT)
-        except OSError as e:
-            raise ChargerError(f"Cannot reach DP832A at {host}:{port}: {e}") from e
-        self._sock = sock
-        try:
-            idn = self._query(DP832AProtocol.cmd_idn())
-        except OSError as e:
-            self._close_socket()
-            raise ChargerError(f"No SCPI response from {host}:{port}: {e}") from e
-        if not DP832AProtocol.parse_idn(idn):
-            self._close_socket()
-            raise ChargerError(f"Device at {host}:{port} is not a DP832A: {idn!r}")
-        self._identity = idn.strip()
+            transport.connect(
+                DP832AProtocol.parse_idn, describe=f"DP832A at {host}:{port}"
+            )
+        except ScpiError as e:
+            raise ChargerError(str(e)) from e
+        self._transport = transport
+        self._apply_callbacks()
         self._host = host
-        self._connected = True
-        self._running = True
-        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._poll_thread.start()
+        transport.start_polling(self._poll_once)
         return True
 
     def disconnect(self) -> None:
-        self._running = False
-        if self._poll_thread and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=self.SOCKET_TIMEOUT + 1.0)
-        self._poll_thread = None
-        self._close_socket()
-        self._connected = False
-        self._last_status = None
+        if self._transport is not None:
+            self._transport.disconnect()
 
     def set_voltage(self, volts: float) -> bool:
         return self._command(DP832AProtocol.cmd_set_voltage(self._channel, volts))
@@ -120,94 +105,43 @@ class RigolDP832A:
         return self._command(DP832AProtocol.cmd_set_output(self._channel, False))
 
     def _command(self, cmd: str) -> bool:
-        if not self._lock.acquire(timeout=self.GUI_LOCK_TIMEOUT):
-            self._report_error(f"Charger busy, command dropped: {cmd}")
+        if self._transport is None:
             return False
-        try:
-            self._write(cmd)
-            return True
-        except OSError as e:
-            self._report_error(f"Charger command failed: {e}")
-            return False
-        finally:
-            self._lock.release()
+        return self._transport.command(cmd)
 
-    def _write(self, cmd: str) -> None:
-        self._sock.sendall((cmd + "\n").encode("ascii"))
-
-    def _read_line(self) -> str:
-        chunks = []
-        while True:
-            data = self._sock.recv(4096)
-            if not data:
-                raise OSError("Connection closed by instrument")
-            chunks.append(data)
-            if data.endswith(b"\n"):
-                break
-        return b"".join(chunks).decode("ascii").strip()
-
-    def _query(self, cmd: str) -> str:
-        self._write(cmd)
-        return self._read_line()
+    def _apply_callbacks(self) -> None:
+        if self._transport is None:
+            return
+        if self._status_callback is not None:
+            self._transport.set_status_callback(self._status_callback)
+        if self._error_callback is not None:
+            self._transport.set_error_callback(self._error_callback)
 
     def _poll_once(self) -> ChargerStatus:
+        """Read one status snapshot; runs under the transport lock."""
         proto = DP832AProtocol
-        with self._lock:
+        transport = self._transport
+
+        def read() -> ChargerStatus:
             ch = self._channel
             volts, amps, watts = proto.parse_measure_all(
-                self._query(proto.cmd_measure_all(ch))
+                transport.query(proto.cmd_measure_all(ch))
             )
-            output_on = proto.parse_output_state(self._query(proto.cmd_query_output(ch)))
-            mode = proto.parse_mode(self._query(proto.cmd_query_mode(ch))) if output_on else "UR"
-        return ChargerStatus(
-            voltage_v=volts,
-            current_a=amps,
-            power_w=watts,
-            output_on=output_on,
-            mode=mode,
-            channel=ch,
-        )
+            output_on = proto.parse_output_state(
+                transport.query(proto.cmd_query_output(ch))
+            )
+            mode = (
+                proto.parse_mode(transport.query(proto.cmd_query_mode(ch)))
+                if output_on
+                else "UR"
+            )
+            return ChargerStatus(
+                voltage_v=volts,
+                current_a=amps,
+                power_w=watts,
+                output_on=output_on,
+                mode=mode,
+                channel=ch,
+            )
 
-    def _poll_tick(self) -> None:
-        """One poll pass: query the instrument, update last_status, fire callbacks.
-
-        Extracted from _poll_loop so it can be exercised directly in tests
-        without running the background thread. A failed poll invalidates
-        last_status (set to None) so stale data can never be mistaken for a
-        current reading by a consumer such as ChargeMonitor.
-        """
-        try:
-            status = self._poll_once()
-            self._last_status = status
-            if self._status_callback:
-                try:
-                    self._status_callback(status)
-                except Exception:
-                    pass
-        except Exception as e:
-            self._last_status = None
-            if self._running:
-                self._report_error(f"Charger poll failed: {e}")
-
-    def _poll_loop(self) -> None:
-        while self._running:
-            start = time.monotonic()
-            self._poll_tick()
-            remaining = self.POLL_INTERVAL - (time.monotonic() - start)
-            if remaining > 0:
-                time.sleep(remaining)
-
-    def _close_socket(self) -> None:
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-        self._sock = None
-
-    def _report_error(self, message: str) -> None:
-        if self._error_callback:
-            try:
-                self._error_callback(message)
-            except Exception:
-                pass
+        return transport.run_locked(read)
