@@ -166,22 +166,38 @@ slot, no engine changes.
 
 **Meter role (designed now, driver later):** `MeterDevice` Protocol —
 `is_connected`, `last_status` (a small `MeterStatus` with `voltage_v`,
-optional `current_a`), for a SCPI DMM doing independent (e.g. 4-wire) voltage
-sensing. Discharge/charge phases take an optional `voltage_source` param
+optional `current_a`), for a SCPI DMM doing independent voltage sensing.
+Anticipated instrument: OWON HDS200-series handheld scope/DMM, SCPI over USB
+(see transport extraction below). Discharge/charge phases take an optional `voltage_source` param
 (`"device"` default | `"meter"`): when `"meter"` and a meter is registered,
 cutoff/termination decisions use the meter voltage, and each reading row also
 records it in the new nullable `readings.aux_voltage_v` column (added in
 migration 1 so no second migration is needed when the hardware arrives). No
 concrete meter driver is built until real hardware exists.
 
-**SCPI transport extraction:** the DP832A driver currently bundles generic
-SCPI-over-LAN plumbing with DP832A-specific commands. Extract
-`protocol/scpi_transport.py` — `ScpiTransport` owning the socket, line
-framing, connect/`*IDN?` verification hook, poll thread, lock-timeout command
-pattern, and error callbacks — and refactor `RigolDP832A` onto it (public
-behavior unchanged; existing FakeSocket tests keep passing). Future SCPI
-instruments (DMM, SCPI electronic load) then need only a protocol
-builder/parser class + a role-Protocol adapter.
+**SCPI transport extraction (LAN and USB):** the DP832A driver currently
+bundles generic SCPI plumbing with DP832A-specific commands, and it assumes a
+TCP socket — but SCPI instruments arrive over more than one link (the
+anticipated meter, an OWON HDS200-series handheld scope/DMM, is **SCPI over
+USB**). Extract `protocol/scpi_transport.py` in two layers:
+
+- **`ScpiLink` protocol** — a minimal byte link: `open()`, `close()`,
+  `send(bytes)`, `recv() -> bytes`, timeout handling. Implementations:
+  `LanScpiLink` (TCP socket, extracted from `rigol_dp832a.py`) and
+  `UsbScpiLink` (USB CDC serial via the existing `pyserial` dependency, or
+  raw USB bulk if the instrument requires it — decided per instrument from
+  its protocol doc). Tests keep using the FakeSocket pattern, which becomes a
+  fake `ScpiLink`.
+- **`ScpiTransport`** — link-agnostic: line framing/terminators,
+  connect + `*IDN?` verification hook, poll thread, lock-timeout command
+  pattern, error callbacks.
+
+`RigolDP832A` is refactored onto `ScpiTransport(LanScpiLink)` with public
+behavior unchanged (existing tests keep passing). Future SCPI instruments
+then need only a protocol builder/parser class + a role-Protocol adapter,
+regardless of link. The HDS200 meter driver specifically awaits its protocol
+PDF (`docs/HDS200_Series_SCPI_Protocol.pdf` — currently an empty placeholder
+that needs re-adding) and the hardware.
 
 **Alternate SCPI loads:** the `LoadDevice` Protocol was checked against
 typical SCPI loads (Rigol DL3000, Siglent SDL1000): `:INP ON|OFF`,
