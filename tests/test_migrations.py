@@ -2,6 +2,8 @@
 
 import sqlite3
 
+import pytest
+
 from load_test_bench.data.database import Database
 
 # Verbatim v0 schema, for building a pre-migration fixture database.
@@ -97,6 +99,33 @@ class TestMigrations:
         Database(path).close()
         db = Database(path)
         assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        db.close()
+
+    def test_failed_migration_rolls_back_completely(self, tmp_path):
+        """A mid-migration failure must leave no partial schema behind, so
+        reopening retries cleanly instead of crashing forever."""
+        from load_test_bench.data import database as db_module
+
+        def bad_migration(conn):
+            conn.execute("CREATE TABLE half_done (id INTEGER)")
+            raise RuntimeError("boom")
+
+        db_module._MIGRATIONS.append(bad_migration)
+        try:
+            with pytest.raises(RuntimeError):
+                Database(tmp_path / "tests.db")
+        finally:
+            db_module._MIGRATIONS.pop()
+        db = Database(tmp_path / "tests.db")
+        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        names = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "half_done" not in names
+        assert "jobs" in names
         db.close()
 
 

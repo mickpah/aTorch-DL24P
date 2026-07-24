@@ -148,12 +148,21 @@ class Database:
         self._run_migrations()
 
     def _run_migrations(self) -> None:
-        """Apply pending schema migrations, tracked via PRAGMA user_version."""
+        """Apply pending schema migrations, tracked via PRAGMA user_version.
+
+        Each migration runs in one transaction: a mid-migration failure rolls
+        back completely, leaving user_version unchanged for a clean retry.
+        """
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         for index in range(version, len(_MIGRATIONS)):
-            _MIGRATIONS[index](self._conn)
-            self._conn.execute(f"PRAGMA user_version = {index + 1}")
-            self._conn.commit()
+            try:
+                self._conn.execute("BEGIN")
+                _MIGRATIONS[index](self._conn)
+                self._conn.execute(f"PRAGMA user_version = {index + 1}")
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def close(self) -> None:
         """Close database connection."""
