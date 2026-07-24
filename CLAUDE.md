@@ -159,6 +159,10 @@ over its LAN interface (raw SCPI on TCP port 5555, stdlib socket - no VISA).
 - OVP is set automatically to charge voltage + 0.1 V at charge start
 - Session file: `sessions/dp832a_charger_session.json` (host, port, channel,
   setpoints)
+- Failure model: on network loss or an app crash mid-charge, the PSU keeps
+  sourcing with only its own setpoints/OVP as protection - the app-side
+  safety timeout is unenforceable without connectivity, so size the
+  instrument-side voltage/current/OVP limits accordingly
 
 ## Key Files
 

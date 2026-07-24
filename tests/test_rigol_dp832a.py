@@ -1,5 +1,6 @@
 """Tests for the RigolDP832A LAN driver using a scripted fake socket."""
 
+from load_test_bench.protocol.dp832a_protocol import ChargerStatus
 from load_test_bench.protocol.rigol_dp832a import RigolDP832A
 
 
@@ -105,3 +106,26 @@ class TestPolling:
         assert status.output_on is False
         assert status.mode == "UR"
         assert ":OUTP:MODE? CH1" not in device._sock.sent
+
+    def test_poll_tick_clears_last_status_on_failure(self):
+        """A failed poll must invalidate last_status - a consumer like
+        ChargeMonitor must never mistake stale data for a fresh reading."""
+        device = make_device(BrokenSocket())
+        device._last_status = ChargerStatus(
+            voltage_v=4.1, current_a=0.5, power_w=2.0, output_on=True, mode="CC", channel=1
+        )
+        device._running = True
+        errors = []
+        device.set_error_callback(errors.append)
+        device._poll_tick()
+        assert device.last_status is None
+        assert len(errors) == 1
+
+    def test_poll_tick_sets_last_status_on_success(self):
+        device = make_device()
+        device._running = True
+        device._poll_tick()
+        status = device.last_status
+        assert status is not None
+        assert status.voltage_v == 4.105
+        assert status.output_on is True

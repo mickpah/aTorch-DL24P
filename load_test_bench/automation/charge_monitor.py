@@ -9,6 +9,8 @@ from enum import Enum
 
 from ..protocol.dp832a_protocol import ChargerStatus
 
+DEFAULT_TAPER_SAMPLES = 5
+
 
 class ChargeState(Enum):
     IDLE = "idle"
@@ -32,7 +34,7 @@ class ChargeMonitor:
         self,
         termination_current_a: float,
         timeout_s: float,
-        taper_samples: int = 5,
+        taper_samples: int = DEFAULT_TAPER_SAMPLES,
     ) -> None:
         self.termination_current_a = termination_current_a
         self.timeout_s = timeout_s

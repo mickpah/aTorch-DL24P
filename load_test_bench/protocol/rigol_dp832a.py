@@ -168,20 +168,31 @@ class RigolDP832A:
             channel=ch,
         )
 
+    def _poll_tick(self) -> None:
+        """One poll pass: query the instrument, update last_status, fire callbacks.
+
+        Extracted from _poll_loop so it can be exercised directly in tests
+        without running the background thread. A failed poll invalidates
+        last_status (set to None) so stale data can never be mistaken for a
+        current reading by a consumer such as ChargeMonitor.
+        """
+        try:
+            status = self._poll_once()
+            self._last_status = status
+            if self._status_callback:
+                try:
+                    self._status_callback(status)
+                except Exception:
+                    pass
+        except Exception as e:
+            self._last_status = None
+            if self._running:
+                self._report_error(f"Charger poll failed: {e}")
+
     def _poll_loop(self) -> None:
         while self._running:
             start = time.monotonic()
-            try:
-                status = self._poll_once()
-                self._last_status = status
-                if self._status_callback:
-                    try:
-                        self._status_callback(status)
-                    except Exception:
-                        pass
-            except (OSError, ValueError) as e:
-                if self._running:
-                    self._report_error(f"Charger poll failed: {e}")
+            self._poll_tick()
             remaining = self.POLL_INTERVAL - (time.monotonic() - start)
             if remaining > 0:
                 time.sleep(remaining)

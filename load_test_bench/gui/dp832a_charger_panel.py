@@ -1,8 +1,9 @@
 """Battery charging panel driving a Rigol DP832A power supply over LAN.
 
-Self-contained: the panel owns its RigolDP832A instance (panels in this app
-drive their devices directly - see charger_panel.py). Status callbacks arrive
-on the poll thread and are marshalled to the GUI thread via Qt signals.
+DL24 panels in this app drive an injected device owned by MainWindow. This
+panel additionally OWNS its RigolDP832A instance, since the charger is
+independent of the DL24 connection. Status callbacks arrive on the poll
+thread and are marshalled to the GUI thread via Qt signals.
 """
 
 import json
@@ -24,12 +25,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..automation.charge_monitor import ChargeMonitor, ChargeState
+from ..automation.charge_monitor import DEFAULT_TAPER_SAMPLES, ChargeMonitor, ChargeState
 from ..config import get_data_dir
 from ..protocol.dp832a_protocol import CHANNEL_LIMITS
 from ..protocol.rigol_dp832a import ChargerError, RigolDP832A
 
 OVP_MARGIN_V = 0.1  # OVP armed this far above the charge voltage
+MAX_OUTPUT_OFF_RETRIES = 10  # 1 initial attempt + up to 9 retries, 1 s apart
+STALE_STATUS_FAULT_TICKS = 5  # consecutive missing-status ticks before declaring a fault
 
 
 class DP832AChargerPanel(QWidget):
@@ -46,10 +49,19 @@ class DP832AChargerPanel(QWidget):
         self._monitor: Optional[ChargeMonitor] = None
         self._loading_settings = False
         self._session_file = get_data_dir() / "sessions" / "dp832a_charger_session.json"
+        self._stale_ticks = 0
 
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._on_tick)
+
+        # Retry loop for output_off() failures (lock-busy / I/O error) - see
+        # _ensure_output_off().
+        self._output_off_attempts = 0
+        self._output_off_retry_timer = QTimer(self)
+        self._output_off_retry_timer.setSingleShot(True)
+        self._output_off_retry_timer.setInterval(1000)
+        self._output_off_retry_timer.timeout.connect(self._retry_output_off)
 
         self._create_ui()
         self._load_session()
@@ -113,7 +125,8 @@ class DP832AChargerPanel(QWidget):
         self.term_current_spin.setValue(0.05)
         self.term_current_spin.setSuffix(" A")
         self.term_current_spin.setToolTip(
-            "Charge ends when CV-mode current stays below this for 5 seconds"
+            f"Charge ends when CV-mode current stays below this for "
+            f"{DEFAULT_TAPER_SAMPLES} consecutive samples"
         )
         settings_layout.addWidget(self.term_current_spin, 2, 1)
         settings_layout.addWidget(QLabel("Safety Timeout:"), 3, 0)
@@ -220,21 +233,31 @@ class DP832AChargerPanel(QWidget):
             timeout_s=self.timeout_spin.value() * 3600.0,
         )
         self._monitor.start(time.monotonic())
+        self._stale_ticks = 0
         self._set_charging_ui(True)
         self.state_label.setText("Charging…")
+        self.elapsed_label.setText("00:00:00")
         self._tick_timer.start()
 
     @Slot()
     def _on_stop_clicked(self) -> None:
-        self._stop_if_charging()
-        self.state_label.setText("Stopped by user")
+        if self._stop_if_charging():
+            self.state_label.setText("Stopped by user")
 
-    def _stop_if_charging(self) -> None:
-        if self._monitor and self._monitor.state == ChargeState.CHARGING:
-            self.charger.output_off()
+    def _stop_if_charging(self) -> bool:
+        """Tear down charging state. Returns True once the output is confirmed off.
+
+        On False, _ensure_output_off() is already retrying (or gave up) and
+        has put its own warning on state_label - callers should not overwrite
+        it with a "stopped" message.
+        """
+        was_charging = self._monitor is not None and self._monitor.state == ChargeState.CHARGING
         self._monitor = None
         self._tick_timer.stop()
         self._set_charging_ui(False)
+        if was_charging:
+            return self._ensure_output_off()
+        return True
 
     @Slot()
     def _on_tick(self) -> None:
@@ -244,7 +267,14 @@ class DP832AChargerPanel(QWidget):
         self.elapsed_label.setText(self._format_elapsed(self._monitor.elapsed_s(now)))
         status = self.charger.last_status
         if status is None:
+            self._stale_ticks += 1
+            if self._stale_ticks >= STALE_STATUS_FAULT_TICKS:
+                self._finish_charge(
+                    "Charge stopped: lost contact with charger - output state "
+                    "unknown, check the instrument"
+                )
             return
+        self._stale_ticks = 0
         state = self._monitor.update(status, now)
         if state == ChargeState.COMPLETE:
             self._finish_charge("Charge complete (current tapered below cutoff)")
@@ -254,16 +284,53 @@ class DP832AChargerPanel(QWidget):
             self._finish_charge("Charge stopped: output turned off unexpectedly")
 
     def _finish_charge(self, message: str) -> None:
-        self.charger.output_off()
         self._monitor = None
         self._tick_timer.stop()
         self._set_charging_ui(False)
-        self.state_label.setText(message)
+        if self._ensure_output_off():
+            self.state_label.setText(message)
+
+    # --- output-off retry (fix for silently-ignored output_off() failure) ---
+
+    def _ensure_output_off(self) -> bool:
+        """Turn the charger output off, retrying on failure without blocking the GUI.
+
+        Returns True if the output is confirmed off on this call. On False a
+        1 s single-shot retry loop has been started (up to
+        MAX_OUTPUT_OFF_RETRIES total attempts) and state_label shows a
+        warning; if retries are exhausted or the charger is disconnected, the
+        warning is left showing for the user to act on.
+        """
+        self._output_off_attempts = 0
+        return self._attempt_output_off()
+
+    def _attempt_output_off(self) -> bool:
+        self._output_off_attempts += 1
+        if self.charger.output_off():
+            if self._output_off_attempts > 1:
+                self.state_label.setText(f"{self.state_label.text()} (output off after retry)")
+            return True
+        if not self.charger.is_connected or self._output_off_attempts >= MAX_OUTPUT_OFF_RETRIES:
+            return False
+        self.state_label.setText(
+            "WARNING: failed to turn charger output off - retrying... "
+            "If this persists, turn the channel off on the instrument front panel."
+        )
+        self._output_off_retry_timer.start()
+        return False
+
+    @Slot()
+    def _retry_output_off(self) -> None:
+        self._attempt_output_off()
 
     # --- status display (GUI thread, via signals) ---
 
     @Slot(object)
     def _on_charger_status(self, status) -> None:
+        if not self.charger.is_connected:
+            # A queued signal from the poll thread's final iteration can arrive
+            # after disconnect already cleared the labels - don't repopulate them.
+            return
         self.voltage_label.setText(f"{status.voltage_v:.3f} V")
         self.current_label.setText(f"{status.current_a:.3f} A")
         self.power_label.setText(f"{status.power_w:.3f} W")
@@ -283,7 +350,13 @@ class DP832AChargerPanel(QWidget):
         if not connected:
             self.identity_label.setText("Not connected")
             self.stop_button.setEnabled(False)
-            for label in (self.voltage_label, self.current_label, self.power_label, self.mode_label):
+            for label in (
+                self.voltage_label,
+                self.current_label,
+                self.power_label,
+                self.mode_label,
+                self.elapsed_label,
+            ):
                 label.setText("--")
             self.state_label.setText("Idle")
 
@@ -347,7 +420,10 @@ class DP832AChargerPanel(QWidget):
         try:
             self.host_edit.setText(data.get("host", ""))
             self.port_spin.setValue(data.get("port", RigolDP832A.DEFAULT_PORT))
-            self.channel_combo.setCurrentIndex(data.get("channel", 1) - 1)
+            channel = data.get("channel", 1)
+            if channel not in (1, 2, 3):
+                channel = 1
+            self.channel_combo.setCurrentIndex(channel - 1)
             self.voltage_spin.setValue(data.get("voltage", 4.2))
             self.current_spin.setValue(data.get("current", 1.0))
             self.term_current_spin.setValue(data.get("termination_current", 0.05))
@@ -358,6 +434,21 @@ class DP832AChargerPanel(QWidget):
     # --- app shutdown ---
 
     def shutdown(self) -> None:
-        """Stop any active charge and disconnect. Called from MainWindow.closeEvent."""
-        self._stop_if_charging()
+        """Stop any active charge and disconnect. Called from MainWindow.closeEvent.
+
+        The app is exiting, so there's no time (or event loop) left for the
+        1 s QTimer retry loop _ensure_output_off() normally uses - retry
+        synchronously a couple of times instead, then disconnect regardless.
+        """
+        if self._output_off_retry_timer.isActive():
+            self._output_off_retry_timer.stop()
+        was_charging = self._monitor is not None and self._monitor.state == ChargeState.CHARGING
+        self._monitor = None
+        self._tick_timer.stop()
+        if was_charging:
+            for attempt in range(3):
+                if self.charger.output_off():
+                    break
+                if attempt < 2:
+                    time.sleep(0.5)
         self.charger.disconnect()
