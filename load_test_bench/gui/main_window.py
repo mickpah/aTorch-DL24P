@@ -4,6 +4,7 @@ import csv
 import json
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -30,6 +31,9 @@ from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon
 
 from ..protocol.device import Device, USBHIDDevice, DeviceError
 from ..protocol.atorch_protocol import DeviceStatus
+from ..protocol.rigol_dp832a import RigolDP832A
+from ..jobs.ledger import JobLedger
+from ..jobs.recovery import finalize_orphans, make_safe
 from .control_panel import ConnectionType
 from ..data.database import Database
 from ..data.models import TestSession, Reading
@@ -67,6 +71,7 @@ class MainWindow(QMainWindow):
     debug_message = Signal(str, str, bytes)  # event_type, message, data
     error_occurred = Signal(str)  # error message
     prepare_needed = Signal()  # device needs USB prepare (no response detected)
+    recovery_safe_result = Signal(str)  # startup make-safe outcome for the statusbar
 
     DEBUG_LOG_FILE = str(Path(__file__).resolve().parents[2] / "debug.log")
 
@@ -145,6 +150,12 @@ class MainWindow(QMainWindow):
         self._create_menus()
         self._create_system_tray()
         self._create_statusbar()
+
+        # Startup crash recovery: detect orphaned runs, make hardware safe.
+        # Never resumes anything - see jobs/recovery.py and the design spec.
+        self.job_ledger = JobLedger(self.database)
+        self.recovery_safe_result.connect(self.statusbar.showMessage)
+        self._run_startup_recovery()
 
         # Load and apply tooltip preference
         tooltips_enabled = self._load_tooltip_preference()
@@ -4169,6 +4180,79 @@ class MainWindow(QMainWindow):
             self.device.send_command(data)
         else:
             self.debug_window.log_error("Not connected to device")
+
+    def _run_startup_recovery(self) -> None:
+        """Finalize runs orphaned by a crash; kick off background make-safe."""
+        report = finalize_orphans(self.job_ledger, self.database)
+        if not report.found_anything:
+            return
+        job_lines = [
+            f"  • job {job['id']} '{job['name']}' ({job['state']}, "
+            f"last heartbeat {job.get('heartbeat_at') or 'never'})"
+            for job in report.orphaned_jobs
+        ]
+        if report.orphaned_session_ids:
+            job_lines.append(
+                f"  • {len(report.orphaned_session_ids)} unfinalized data session(s)"
+            )
+        threading.Thread(target=self._startup_make_safe, daemon=True).start()
+        QMessageBox.warning(
+            self,
+            "Interrupted runs recovered",
+            "The previous session did not shut down cleanly. These runs were "
+            "finalized as interrupted (all recorded data kept):\n\n"
+            + "\n".join(job_lines)
+            + "\n\nAttempting to turn device outputs off in the background - "
+            "verify on the instruments. No run is resumed.",
+        )
+
+    def _startup_make_safe(self) -> None:
+        """Best-effort outputs-off on a background thread (startup never blocks).
+
+        Emits the outcome via recovery_safe_result - this runs OFF the GUI
+        thread, so no direct widget access here.
+        """
+        load_ok = psu_ok = None
+        try:
+            if USBHIDDevice.is_available():
+                dl24 = USBHIDDevice()
+                try:
+                    if dl24.connect():
+                        load_ok, _ = make_safe(load=dl24)
+                finally:
+                    dl24.disconnect()
+        except Exception:
+            load_ok = False
+        try:
+            session_file = get_data_dir() / "sessions" / "dp832a_charger_session.json"
+            if session_file.exists():
+                with open(session_file) as f:
+                    saved = json.load(f)
+                host = (saved.get("host") or "").strip()
+                if host:
+                    psu = RigolDP832A()
+                    try:
+                        psu.set_channel(saved.get("channel", 1))
+                        psu.connect(host, saved.get("port", RigolDP832A.DEFAULT_PORT))
+                        _, psu_ok = make_safe(psu=psu)
+                    finally:
+                        psu.disconnect()
+        except Exception:
+            psu_ok = False
+
+        def describe(name: str, ok) -> str:
+            if ok is None:
+                return f"{name}: not present"
+            if ok:
+                return f"{name}: output confirmed OFF"
+            return f"{name}: OUTPUT STATE UNKNOWN - check the instrument"
+
+        self.recovery_safe_result.emit(
+            "Recovery make-safe - "
+            + describe("DL24", load_ok)
+            + "; "
+            + describe("DP832A", psu_ok)
+        )
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close."""
