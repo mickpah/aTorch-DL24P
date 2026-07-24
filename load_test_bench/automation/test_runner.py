@@ -1,27 +1,38 @@
-"""Test execution engine for automated testing."""
+"""TestRunner - compatibility facade over the job engine (Stage-1 shim).
+
+Preserves the public surface main_window and the panels use (start/stop/
+pause/resume, progress/complete callbacks, .device) while execution lives in
+jobs/engine.py. Callbacks fire on the engine thread - the same threading
+semantics as the old worker-thread TestRunner. Deleted in Stage 5 once all
+consumers build JobSpecs directly.
+"""
 
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum, auto
 from typing import Callable, Optional
-import threading
-import time
 
-from ..protocol.device import Device
-from ..protocol.atorch_protocol import DeviceStatus
-from ..data.models import TestSession, Reading
 from ..data.database import Database
+from ..data.models import TestSession
+from ..jobs.engine import JobEngine
+from ..jobs.model import (
+    TERMINAL_JOB_STATES,
+    JobSnapshot,
+    JobSpec,
+    JobState,
+    PhaseSpec,
+)
 from .profiles import (
-    TestProfile,
-    DischargeProfile,
     CycleProfile,
-    TimedProfile,
+    DischargeProfile,
     SteppedProfile,
+    TestProfile,
+    TimedProfile,
 )
 
 
 class TestState(Enum):
     """Test execution states."""
+
     IDLE = auto()
     STARTING = auto()
     RUNNING = auto()
@@ -36,6 +47,7 @@ class TestState(Enum):
 @dataclass
 class TestProgress:
     """Current test progress information."""
+
     state: TestState
     elapsed_seconds: int = 0
     current_step: int = 0
@@ -45,410 +57,187 @@ class TestProgress:
     message: str = ""
 
 
+def profile_to_spec(profile: TestProfile, battery_name: str, notes: str) -> JobSpec:
+    """Translate a legacy TestProfile into a declarative JobSpec."""
+    if isinstance(profile, DischargeProfile):
+        params = {
+            "current_a": profile.current_a,
+            "voltage_cutoff": profile.voltage_cutoff,
+        }
+        if profile.max_duration_s is not None:
+            params["max_duration_s"] = profile.max_duration_s
+        phases, job_type = (PhaseSpec("discharge", params),), "discharge"
+    elif isinstance(profile, CycleProfile):
+        phase_list = []
+        for cycle in range(profile.num_cycles):
+            phase_list.append(
+                PhaseSpec(
+                    "discharge",
+                    {
+                        "current_a": profile.current_a,
+                        "voltage_cutoff": profile.voltage_cutoff,
+                    },
+                )
+            )
+            if cycle < profile.num_cycles - 1:
+                phase_list.append(
+                    PhaseSpec("rest", {"duration_s": profile.rest_between_cycles_s})
+                )
+        phases, job_type = tuple(phase_list), "cycle"
+    elif isinstance(profile, TimedProfile):
+        params = {"current_a": profile.current_a, "duration_s": profile.duration_s}
+        if profile.voltage_cutoff is not None:
+            params["voltage_cutoff"] = profile.voltage_cutoff
+        phases, job_type = (PhaseSpec("timed", params),), "timed"
+    elif isinstance(profile, SteppedProfile):
+        steps = [[step["current_a"], step["duration_s"]] for step in profile.steps]
+        params = {
+            "steps": steps,
+            "rest_between_steps_s": profile.rest_between_steps_s,
+        }
+        if profile.voltage_cutoff is not None:
+            params["voltage_cutoff"] = profile.voltage_cutoff
+        phases, job_type = (PhaseSpec("stepped", params),), "stepped"
+    else:
+        raise ValueError(f"Unknown profile type: {type(profile).__name__}")
+    return JobSpec(
+        name=profile.name,
+        job_type=job_type,
+        phases=phases,
+        battery_name=battery_name,
+        notes=notes,
+    )
+
+
 class TestRunner:
-    """Executes automated tests on the DL24P."""
-
-    def __init__(self, device: Device, database: Database):
-        self.device = device
+    def __init__(self, device, database: Database, engine: JobEngine) -> None:
+        self.device = device  # panels read .device.is_connected
         self.database = database
-
+        self._engine = engine
+        self._job_id: Optional[int] = None
+        self._is_cycle_job = False
+        self._total_cycles = 1
         self._state = TestState.IDLE
-        self._profile: Optional[TestProfile] = None
-        self._session: Optional[TestSession] = None
-        self._thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
-        self._pause_event = threading.Event()
-        self._pause_event.set()  # Not paused initially
-
         self._progress = TestProgress(state=TestState.IDLE)
         self._progress_callback: Optional[Callable[[TestProgress], None]] = None
         self._complete_callback: Optional[Callable[[TestSession], None]] = None
+        engine.executor.add_snapshot_callback(self._on_snapshot)
 
     @property
     def state(self) -> TestState:
-        """Get current test state."""
         return self._state
 
     @property
     def progress(self) -> TestProgress:
-        """Get current progress."""
         return self._progress
 
     @property
     def is_running(self) -> bool:
-        """Check if a test is currently running."""
         return self._state in (TestState.STARTING, TestState.RUNNING, TestState.PAUSED)
 
     def set_progress_callback(self, callback: Callable[[TestProgress], None]) -> None:
-        """Set callback for progress updates."""
         self._progress_callback = callback
 
     def set_complete_callback(self, callback: Callable[[TestSession], None]) -> None:
-        """Set callback for test completion."""
         self._complete_callback = callback
 
-    def start(
-        self,
-        profile: TestProfile,
-        battery_name: str = "",
-        notes: str = "",
-    ) -> bool:
-        """Start a test with the given profile.
-
-        Args:
-            profile: Test profile to execute
-            battery_name: Name of the battery being tested
-            notes: Optional notes about the test
-
-        Returns:
-            True if test started successfully
-        """
+    def start(self, profile: TestProfile, battery_name: str = "", notes: str = "") -> bool:
         if self.is_running:
             return False
-
-        if not self.device.is_connected:
+        if self.device is None or not self.device.is_connected:
             return False
-
-        self._profile = profile
-        self._stop_event.clear()
-        self._pause_event.set()
-
-        # Create session
-        self._session = TestSession(
-            name=profile.name,
-            start_time=datetime.now(),
-            battery_name=battery_name,
-            notes=notes,
-            test_type=profile.__class__.__name__.replace("Profile", "").lower(),
-            settings=profile.to_dict(),
-        )
-        self.database.create_session(self._session)
-
-        # Start test thread
+        try:
+            spec = profile_to_spec(profile, battery_name, notes)
+        except ValueError:
+            return False
+        try:
+            self._job_id = self._engine.submit(spec)
+        except RuntimeError:  # safety lockout
+            return False
+        self._is_cycle_job = isinstance(profile, CycleProfile)
+        self._total_cycles = profile.num_cycles if self._is_cycle_job else 1
         self._state = TestState.STARTING
-        self._thread = threading.Thread(target=self._run_test, daemon=True)
-        self._thread.start()
-
+        self._progress = TestProgress(
+            state=TestState.STARTING,
+            total_steps=len(spec.phases),
+            total_cycles=self._total_cycles,
+        )
         return True
 
     def stop(self) -> None:
-        """Stop the current test."""
-        if not self.is_running:
-            return
-
-        self._state = TestState.STOPPING
-        self._stop_event.set()
-        self._pause_event.set()  # Unpause to allow thread to exit
-
-        if self._thread:
-            self._thread.join(timeout=5.0)
+        if self._job_id is not None:
+            self._state = TestState.STOPPING
+            self._engine.stop()
 
     def pause(self) -> None:
-        """Pause the current test."""
         if self._state == TestState.RUNNING:
-            self._state = TestState.PAUSED
-            self._pause_event.clear()
-            self.device.turn_off()
-            self._update_progress(message="Test paused")
+            self._engine.pause()
 
     def resume(self) -> None:
-        """Resume a paused test."""
         if self._state == TestState.PAUSED:
-            self._state = TestState.RUNNING
-            self._pause_event.set()
-            self._update_progress(message="Test resumed")
+            self._engine.resume()
 
-    def _run_test(self) -> None:
-        """Main test execution loop."""
-        try:
-            self._state = TestState.RUNNING
+    # --- snapshot handling (engine thread) ---
 
-            if isinstance(self._profile, DischargeProfile):
-                self._run_discharge(self._profile)
-            elif isinstance(self._profile, CycleProfile):
-                self._run_cycle(self._profile)
-            elif isinstance(self._profile, TimedProfile):
-                self._run_timed(self._profile)
-            elif isinstance(self._profile, SteppedProfile):
-                self._run_stepped(self._profile)
-
-        except Exception as e:
-            self._state = TestState.ERROR
-            self._update_progress(message=f"Error: {e}")
-        finally:
-            self._finish_test()
-
-    def _run_discharge(self, profile: DischargeProfile) -> None:
-        """Execute a discharge test."""
-        self._update_progress(message=f"Starting discharge at {profile.current_a}A")
-
-        # Reset counters and set current
-        self.device.reset_counters()
-        time.sleep(0.5)
-        self.device.set_current(profile.current_a)
-        time.sleep(0.5)
-        self.device.set_voltage_cutoff(profile.voltage_cutoff)
-        time.sleep(0.5)
-        self.device.turn_on()
-
-        start_time = time.time()
-
-        while not self._stop_event.is_set():
-            # Wait if paused
-            self._pause_event.wait()
-
-            if self._stop_event.is_set():
-                break
-
-            # Get current status
-            status = self.device.last_status
-            if status:
-                # Log reading
-                self._log_reading(status)
-
-                # Check voltage cutoff
-                if status.voltage_v <= profile.voltage_cutoff and status.load_on:
-                    self._state = TestState.VOLTAGE_CUTOFF
-                    self._update_progress(message=f"Voltage cutoff reached: {status.voltage_v:.2f}V")
-                    break
-
-                # Check load turned off (device-side cutoff)
-                if not status.load_on and self._state == TestState.RUNNING:
-                    # Device stopped on its own
-                    self._state = TestState.VOLTAGE_CUTOFF
-                    self._update_progress(message="Device stopped (cutoff reached)")
-                    break
-
-                elapsed = int(time.time() - start_time)
-                self._update_progress(
-                    elapsed_seconds=elapsed,
-                    message=f"{status.voltage_v:.2f}V @ {status.current_a:.3f}A",
-                )
-
-                # Check max duration
-                if profile.max_duration_s and elapsed >= profile.max_duration_s:
-                    self._state = TestState.TIMEOUT
-                    self._update_progress(message="Maximum duration reached")
-                    break
-
-            time.sleep(1.0)
-
-    def _run_cycle(self, profile: CycleProfile) -> None:
-        """Execute a cycle test."""
-        for cycle in range(profile.num_cycles):
-            if self._stop_event.is_set():
-                break
-
-            self._update_progress(
-                current_cycle=cycle + 1,
-                total_cycles=profile.num_cycles,
-                message=f"Cycle {cycle + 1}/{profile.num_cycles}",
-            )
-
-            # Run discharge
-            discharge = DischargeProfile(
-                name=f"Cycle {cycle + 1}",
-                current_a=profile.current_a,
-                voltage_cutoff=profile.voltage_cutoff,
-            )
-            self._run_discharge(discharge)
-
-            if self._stop_event.is_set():
-                break
-
-            # Rest between cycles
-            if cycle < profile.num_cycles - 1:
-                self._update_progress(message=f"Resting for {profile.rest_between_cycles_s}s")
-                self.device.turn_off()
-                for _ in range(profile.rest_between_cycles_s):
-                    if self._stop_event.is_set():
-                        break
-                    time.sleep(1.0)
-
-    def _run_timed(self, profile: TimedProfile) -> None:
-        """Execute a timed test."""
-        self._update_progress(message=f"Starting {profile.duration_s}s test at {profile.current_a}A")
-
-        self.device.reset_counters()
-        time.sleep(0.5)
-        self.device.set_current(profile.current_a)
-        time.sleep(0.5)
-        if profile.voltage_cutoff:
-            self.device.set_voltage_cutoff(profile.voltage_cutoff)
-            time.sleep(0.5)
-        self.device.set_timer(profile.duration_s)
-        time.sleep(0.5)
-        self.device.turn_on()
-
-        start_time = time.time()
-
-        while not self._stop_event.is_set():
-            self._pause_event.wait()
-            if self._stop_event.is_set():
-                break
-
-            status = self.device.last_status
-            if status:
-                self._log_reading(status)
-
-                elapsed = int(time.time() - start_time)
-                remaining = max(0, profile.duration_s - elapsed)
-                self._update_progress(
-                    elapsed_seconds=elapsed,
-                    message=f"{remaining}s remaining | {status.voltage_v:.2f}V",
-                )
-
-                if elapsed >= profile.duration_s:
-                    self._state = TestState.COMPLETED
-                    break
-
-                if not status.load_on:
-                    # Timer completed or voltage cutoff
-                    self._state = TestState.COMPLETED
-                    break
-
-            time.sleep(1.0)
-
-    def _run_stepped(self, profile: SteppedProfile) -> None:
-        """Execute a stepped current test."""
-        self.device.reset_counters()
-        time.sleep(0.5)
-
-        if profile.voltage_cutoff:
-            self.device.set_voltage_cutoff(profile.voltage_cutoff)
-            time.sleep(0.5)
-
-        for i, step in enumerate(profile.steps):
-            if self._stop_event.is_set():
-                break
-
-            current = step["current_a"]
-            duration = step["duration_s"]
-
-            self._update_progress(
-                current_step=i + 1,
-                total_steps=len(profile.steps),
-                message=f"Step {i + 1}: {current}A for {duration}s",
-            )
-
-            self.device.set_current(current)
-            time.sleep(0.5)
-            self.device.turn_on()
-
-            # Run step
-            step_start = time.time()
-            while not self._stop_event.is_set():
-                self._pause_event.wait()
-                if self._stop_event.is_set():
-                    break
-
-                status = self.device.last_status
-                if status:
-                    self._log_reading(status)
-
-                    if profile.voltage_cutoff and status.voltage_v <= profile.voltage_cutoff:
-                        self._state = TestState.VOLTAGE_CUTOFF
-                        return
-
-                elapsed = time.time() - step_start
-                if elapsed >= duration:
-                    break
-
-                time.sleep(1.0)
-
-            # Rest between steps
-            if i < len(profile.steps) - 1 and not self._stop_event.is_set():
-                self.device.turn_off()
-                time.sleep(profile.rest_between_steps_s)
-
-        self._state = TestState.COMPLETED
-
-    def _log_reading(self, status: DeviceStatus) -> None:
-        """Log a reading to the database."""
-        # Determine setpoint fields based on current mode
-        # Device mode: 0=CC, 1=CV, 2=CR, 3=CP
-        load_mode = None
-        set_current_a = None
-        set_voltage_v = None
-        set_power_w = None
-        set_resistance_ohm = None
-
-        if status.mode is not None and status.value_set is not None:
-            if status.mode == 0:  # CC mode
-                load_mode = "CC"
-                set_current_a = status.value_set
-            elif status.mode == 1:  # CV mode
-                load_mode = "CV"
-                set_voltage_v = status.value_set
-            elif status.mode == 2:  # CR mode
-                load_mode = "CR"
-                set_resistance_ohm = status.value_set
-            elif status.mode == 3:  # CP mode
-                load_mode = "CP"
-                set_power_w = status.value_set
-
-        # Get cutoff voltage (available for all modes)
-        cutoff_voltage_v = status.voltage_cutoff if status.voltage_cutoff is not None else None
-
-        reading = Reading(
-            timestamp=datetime.now(),
-            voltage_v=status.voltage_v,
-            current_a=status.current_a,
-            power_w=status.power_w,
-            energy_wh=status.energy_wh,
-            capacity_mah=status.capacity_mah,
-            mosfet_temp_c=status.mosfet_temp_c,
-            ext_temp_c=status.ext_temp_c,
-            fan_speed_rpm=status.fan_speed_rpm,
-            load_r_ohm=status.load_r_ohm,
-            battery_r_ohm=status.battery_r_ohm,
-            runtime_s=status.runtime_seconds,
-            load_mode=load_mode,
-            set_current_a=set_current_a,
-            set_voltage_v=set_voltage_v,
-            set_power_w=set_power_w,
-            set_resistance_ohm=set_resistance_ohm,
-            cutoff_voltage_v=cutoff_voltage_v,
+    def _on_snapshot(self, snapshot: JobSnapshot) -> None:
+        if snapshot.job_id != self._job_id:
+            return
+        state = self._map_state(snapshot)
+        current_cycle = (
+            min(snapshot.phase_index // 2 + 1, self._total_cycles)
+            if self._is_cycle_job
+            else 1
         )
-
-        if self._session and self._session.id:
-            self.database.add_reading(self._session.id, reading)
-            self._session.readings.append(reading)
-
-    def _update_progress(self, **kwargs) -> None:
-        """Update and broadcast progress."""
-        for key, value in kwargs.items():
-            if hasattr(self._progress, key):
-                setattr(self._progress, key, value)
-
-        self._progress.state = self._state
-
+        self._progress = TestProgress(
+            state=state,
+            elapsed_seconds=int(snapshot.elapsed_s),
+            current_step=snapshot.phase_index + 1,
+            total_steps=max(len(snapshot.spec.phases), 1),
+            current_cycle=current_cycle,
+            total_cycles=self._total_cycles,
+            message=snapshot.message,
+        )
+        self._state = state
         if self._progress_callback:
             try:
                 self._progress_callback(self._progress)
             except Exception:
                 pass
+        if snapshot.state in TERMINAL_JOB_STATES:
+            self._finish(snapshot)
 
-    def _finish_test(self) -> None:
-        """Clean up after test completion."""
-        # Stop logging first - update session and trigger callbacks
-        if self._session:
-            self._session.end_time = datetime.now()
-            self.database.update_session(self._session)
+    def _map_state(self, snapshot: JobSnapshot) -> TestState:
+        if snapshot.state == JobState.RUNNING:
+            return TestState.RUNNING
+        if snapshot.state == JobState.PAUSED:
+            return TestState.PAUSED
+        if snapshot.state == JobState.PENDING:
+            return TestState.STARTING
+        if snapshot.state == JobState.COMPLETED:
+            if "voltage_cutoff" in snapshot.message:
+                return TestState.VOLTAGE_CUTOFF
+            if "timeout" in snapshot.message:
+                return TestState.TIMEOUT
+            return TestState.COMPLETED
+        if snapshot.state == JobState.STOPPED:
+            return TestState.COMPLETED  # old stop() also normalized to COMPLETED
+        return TestState.ERROR  # FAULTED / INTERRUPTED
 
-            if self._complete_callback:
-                try:
-                    self._complete_callback(self._session)
-                except Exception:
-                    pass
+    def _finish(self, snapshot: JobSnapshot) -> None:
+        job_id, self._job_id = self._job_id, None
+        if self._complete_callback is None or job_id is None:
+            return
+        session = self._last_session(job_id)
+        if session is not None:
+            try:
+                self._complete_callback(session)
+            except Exception:
+                pass
 
-        # Then turn off load
-        try:
-            self.device.turn_off()
-        except Exception:
-            pass
-
-        if self._state not in (TestState.COMPLETED, TestState.VOLTAGE_CUTOFF, TestState.TIMEOUT, TestState.ERROR):
-            self._state = TestState.COMPLETED
-
-        self._update_progress(message="Test complete")
+    def _last_session(self, job_id: int) -> Optional[TestSession]:
+        for phase in reversed(self._engine.executor.ledger.get_phases(job_id)):
+            if phase.get("session_id"):
+                return self.database.get_session(
+                    phase["session_id"], include_readings=True
+                )
+        return None
