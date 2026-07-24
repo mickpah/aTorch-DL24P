@@ -131,8 +131,9 @@ class JobSpec:
     name: str
     job_type: str        # "cycle_test", "discharge", "charge", "stepped_sweep", ...
     phases: tuple[PhaseSpec, ...]
-    battery_name: str = ""
+    battery_name: str = ""              # kept for sessions-table compatibility
     notes: str = ""
+    metadata: dict = field(default_factory=dict)  # domain-specific, opaque to the engine
 
 @dataclass
 class PhaseResult:       # the future Prefect "task return value"
@@ -155,11 +156,44 @@ set_current/set_ovp`) plus `is_connected` and `last_status`. `USBHIDDevice` and
 implementations before coding (CLAUDE.md rule).
 
 `DeviceRegistry` (plain thread-safe class) holds the currently connected
-load/PSU. `MainWindow` registers the DL24 on connect; `DP832AChargerPanel`
-registers its charger on connect. **Ownership does not change.** A job needing
-a missing device fails fast at start with a clear error.
+device **per role** (`load`, `psu`, `meter`). `MainWindow` registers the DL24
+on connect; `DP832AChargerPanel` registers its charger on connect.
+**Ownership does not change.** A job needing a missing device fails fast at
+start with a clear error. New roles are additive: a Protocol + a registry
+slot, no engine changes.
 
-`FakeLoad`/`FakePsu` live in `tests/fakes.py`.
+`FakeLoad`/`FakePsu`/`FakeMeter` live in `tests/fakes.py`.
+
+**Meter role (designed now, driver later):** `MeterDevice` Protocol —
+`is_connected`, `last_status` (a small `MeterStatus` with `voltage_v`,
+optional `current_a`), for a SCPI DMM doing independent (e.g. 4-wire) voltage
+sensing. Discharge/charge phases take an optional `voltage_source` param
+(`"device"` default | `"meter"`): when `"meter"` and a meter is registered,
+cutoff/termination decisions use the meter voltage, and each reading row also
+records it in the new nullable `readings.aux_voltage_v` column (added in
+migration 1 so no second migration is needed when the hardware arrives). No
+concrete meter driver is built until real hardware exists.
+
+**SCPI transport extraction:** the DP832A driver currently bundles generic
+SCPI-over-LAN plumbing with DP832A-specific commands. Extract
+`protocol/scpi_transport.py` — `ScpiTransport` owning the socket, line
+framing, connect/`*IDN?` verification hook, poll thread, lock-timeout command
+pattern, and error callbacks — and refactor `RigolDP832A` onto it (public
+behavior unchanged; existing FakeSocket tests keep passing). Future SCPI
+instruments (DMM, SCPI electronic load) then need only a protocol
+builder/parser class + a role-Protocol adapter.
+
+**Alternate SCPI loads:** the `LoadDevice` Protocol was checked against
+typical SCPI loads (Rigol DL3000, Siglent SDL1000): `:INP ON|OFF`,
+`:FUNC CURR|RES|VOLT|POW`, setpoint and measurement commands map directly onto
+`turn_on/turn_off/set_mode/set_current/set_resistance` and `last_status`.
+Two DL24 features are not universal: device-side voltage cutoff and
+accumulated mAh/Wh counters. Cutoff enforcement is already software-side in
+`DischargeCore` (device-side cutoff is a bonus, not a dependency); for
+counters, the Protocol marks `reset_counters`/accumulators as **optional
+capabilities** — when absent, the executor integrates capacity/energy in
+software from per-tick readings. Noted here so the Protocol is written with
+the split; no SCPI load driver is built until hardware exists.
 
 ### 5.3 Phases (`jobs/phases.py`)
 
@@ -195,6 +229,16 @@ Pure cores (no I/O, caller-supplied `now_s`, one class each):
   preserved). The core *returns commands* (`SET_VALUE(x)`, `REST`, `DONE`);
   the shell executes them — which is what finally makes the sweep logic
   unit-testable.
+
+**Domain neutrality (non-battery task control):** the engine knows nothing
+about batteries. Phase types are registered in a `PHASE_TYPES: dict[str,
+type[Phase]]` mapping in `jobs/phases.py`, so a new domain (PSU burn-in,
+DC-DC converter characterization, generic instrument sequencing) is added by
+writing a new Phase class and registering it — the engine, ledger, scheduler,
+bridge, and recovery are untouched. Battery-ness lives only in phase params
+(`voltage_cutoff`, `termination_current_a`, ...), `JobSpec.battery_name`
+(sessions compatibility) and `JobSpec.metadata`. The safety layer is likewise
+device-role-based, not domain-based.
 
 ### 5.4 Engine (`jobs/engine.py`)
 
@@ -318,6 +362,7 @@ CREATE TABLE scheduled_jobs (
 ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';
     -- 'running' | 'completed' | 'interrupted' | 'faulted'
 ALTER TABLE sessions ADD COLUMN job_phase_id INTEGER;
+ALTER TABLE readings ADD COLUMN aux_voltage_v REAL;   -- meter role, nullable
 ```
 
 **Sessions/readings pipeline unchanged.** Each data-producing phase creates
@@ -400,7 +445,7 @@ Prefect API (or kept as a local mirror). The SafetySupervisor stays app-side
 | Stage | Content | Value shipped |
 |---|---|---|
 | 0 | DB migration 1; `model.py`, `ledger.py`, `recovery.py` + startup hook | Interrupted runs become visible + made safe — before any engine work |
-| 1 | `engine.py`, `devices.py`, discharge/timed/stepped/rest phases, SafetySupervisor; `test_runner.py` becomes a thin facade (same `start/stop/pause/resume/is_running` + callback surface, `TestProfile`→`JobSpec`) so `main_window.py` and the control/capacity/power-bank panels work unmodified | One engine; safety cutouts live |
+| 1 | `engine.py`, `devices.py` (incl. `ScpiTransport` extraction + `RigolDP832A` refactor), discharge/timed/stepped/rest phases, SafetySupervisor; `test_runner.py` becomes a thin facade (same `start/stop/pause/resume/is_running` + callback surface, `TestProfile`→`JobSpec`) so `main_window.py` and the control/capacity/power-bank panels work unmodified | One engine; safety cutouts live; future SCPI instruments become thin protocol classes |
 | 2 | `ChargePhase` wraps ChargeMonitor; DP832A panel submits a single-phase charge job (its `_on_tick`/`_ensure_output_off` logic moves into the phase/engine); panel keeps connection UI + readout | Charging under the same job model |
 | 3 | Cycle-test UI building charge→rest→discharge×N JobSpecs | **The documented future work — now possible** |
 | 4 | Port `battery_load_panel.py`, then `charger_panel.py`, to stepped-sweep jobs; delete their QTimer machinery | Panels shrink to spec-builders + progress renderers |
@@ -435,20 +480,27 @@ Prefect API (or kept as a local mirror). The SafetySupervisor stays app-side
   export, or the notify-only alerts stack.
 - No headless mode yet — the jobs package merely stays Qt-free so headless
   becomes a wrapper, not a rewrite.
+- No pyvisa/VISA, no instrument capability discovery, no generic "add
+  instrument" UI, and no concrete drivers for hardware not yet owned (meter
+  and alternate-load drivers are written when the instruments exist; only
+  their seams — Protocols, registry slots, `aux_voltage_v`, transport — are
+  built now).
 
 ## 10. Files
 
 **Create:** `load_test_bench/jobs/{__init__,model,devices,phases,engine,safety,ledger,recovery,scheduler}.py`,
+`load_test_bench/protocol/scpi_transport.py`,
 `load_test_bench/gui/job_bridge.py`,
 `tests/{fakes,test_phase_cores,test_safety,test_job_executor,test_job_ledger,test_recovery,test_job_scheduler}.py`
 
 **Modify:** `load_test_bench/data/database.py` (user_version migrations, new
-tables, sessions columns), `load_test_bench/gui/main_window.py` (registry,
-bridge, recovery hook, safety observe in `_on_device_status`),
-`load_test_bench/automation/test_runner.py` (facade; deleted in Stage 5),
-`load_test_bench/gui/dp832a_charger_panel.py` (Stage 2), later
-`gui/battery_load_panel.py`, `gui/charger_panel.py`, `gui/settings_dialog.py`
-(Safety tab).
+tables, sessions/readings columns), `load_test_bench/protocol/rigol_dp832a.py`
+(refactor onto `ScpiTransport`, behavior unchanged),
+`load_test_bench/gui/main_window.py` (registry, bridge, recovery hook, safety
+observe in `_on_device_status`), `load_test_bench/automation/test_runner.py`
+(facade; deleted in Stage 5), `load_test_bench/gui/dp832a_charger_panel.py`
+(Stage 2), later `gui/battery_load_panel.py`, `gui/charger_panel.py`,
+`gui/settings_dialog.py` (Safety tab).
 
 **Delete:** `load_test_bench/automation/scheduler.py` (Stage 5).
 
