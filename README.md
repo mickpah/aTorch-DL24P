@@ -1,6 +1,6 @@
 # Load Test Bench & Viewer
 
-A cross-platform suite of applications for controlling the aTorch DL24P electronic load and analyzing battery test data with professional visualization.
+A cross-platform suite of applications for controlling the aTorch DL24P electronic load — plus an optional Rigol DP832A power supply for battery charging — and analyzing battery test data with professional visualization.
 
 ## Overview
 
@@ -25,6 +25,7 @@ Both applications are designed for battery testing, characterization, and qualit
 - **Battery Capacity** - Discharge tests with voltage cutoff and time limits
 - **Battery Load** - Load curve characterization (current/power/resistance sweep)
 - **Battery Charger** - Charger output characterization
+- **Battery Charging** - Charge batteries from a Rigol DP832A power supply over LAN (CC-CV with taper termination)
 - **Charger Load** - AC adapter load testing
 - **Power Bank Capacity** - Power bank capacity and efficiency testing
 
@@ -83,6 +84,7 @@ Both applications are designed for battery testing, characterization, and qualit
   - Power connector: Forspzde SV5.5-5, #10 M5, 12-10 AWG (fork pitch ~7mm, terminal width ~2mm per tab)
     - Each blade is equivalent to a 2.8mm spade terminal
     - Note: SV5.5-5 is a cable cross-section rating, not a lug dimension — verify actual lug dimensions before ordering
+- **Optional hardware:** Rigol DP832A power supply on the same LAN (raw SCPI, TCP port 5555) for battery charging
 
 ## Installation
 
@@ -92,15 +94,16 @@ Both applications are designed for battery testing, characterization, and qualit
    cd aTorch-DL24P
    ```
 
-2. **Create a virtual environment:**
+2. **Install dependencies with [uv](https://docs.astral.sh/uv/):**
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   uv sync --extra dev
    ```
+   uv creates and manages the `.venv` automatically from `pyproject.toml` + `uv.lock`.
+   (`requirements.txt` is legacy — for pip-only environments use `pip install -r requirements.txt`.)
 
-3. **Install dependencies:**
+3. **Optional — list common dev tasks:**
    ```bash
-   pip install -r requirements.txt
+   just    # just run, just viewer, just test, just build, ...
    ```
 
 ## Usage
@@ -109,7 +112,7 @@ Both applications are designed for battery testing, characterization, and qualit
 
 Run the main application:
 ```bash
-python -m load_test_bench.main
+uv run python -m load_test_bench.main   # or: just run
 ```
 
 **macOS: First-Time Setup After Power Cycle**
@@ -154,11 +157,18 @@ The DL24P may not be detected when plugged directly into a Thunderbolt port. Con
 4. Click "Start Test"
 5. Creates a load curve showing voltage vs. load
 
+**Battery Charging (Rigol DP832A):**
+1. Open the "Battery Charging" tab and enter the DP832A's IP address (SCPI over LAN, port 5555)
+2. Pick a channel (CH1/CH2: 30 V/3 A, CH3: 5 V/3 A) and click "Connect"
+3. Set charge voltage, charge current, termination current, and safety timeout
+4. Click "Start Charge" — charging is CC-CV; it completes when CV-mode current stays below the termination cutoff (OVP is armed automatically at charge voltage + 0.1 V)
+5. Safety note: if the network drops or the app closes mid-charge, the supply keeps sourcing with only its own setpoints/OVP as protection — size the instrument-side limits accordingly
+
 ### Test Viewer Application
 
 Run the viewer:
 ```bash
-python -m load_test_bench.viewer
+uv run python -m load_test_bench.viewer   # or: just viewer
 ```
 
 **Quick Start:**
@@ -176,13 +186,13 @@ Create standalone executables for distribution:
 
 ### Windows:
 ```bash
-python build.py
+uv run python build.py
 # Creates: dist/Load Test Bench.exe
 ```
 
 ### macOS:
 ```bash
-python build.py
+uv run python build.py   # or: just build
 # Creates: dist/Load Test Bench.app
 ```
 
@@ -217,12 +227,13 @@ load-test-bench/
 │   ├── data/             # Database and export
 │   ├── automation/       # Test profiles and runner
 │   └── alerts/           # Notifications
-├── tests/                # Unit tests (118 tests)
+├── tests/                # Unit tests (152 tests)
 ├── resources/            # Battery presets, icons
 │   ├── battery_capacity/ # Camera and household battery presets
 │   ├── power_bank/       # Power bank presets
 │   └── icons/            # Application icons
 ├── build.py              # PyInstaller build script
+├── justfile              # Common dev tasks (run `just` to list)
 └── run_load_test_bench.py # Launcher for frozen builds
 ```
 
@@ -230,18 +241,19 @@ load-test-bench/
 
 Run the test suite:
 ```bash
-pytest                    # Run all tests
-pytest -v                 # Verbose output
-pytest tests/test_protocol.py  # Specific test file
+uv run --extra dev pytest                          # Run all tests (or: just test)
+uv run --extra dev pytest -v                       # Verbose output
+uv run --extra dev pytest tests/test_protocol.py   # Specific test file
 ```
 
-**Test Coverage:** 118 tests across 6 test files:
+**Test Coverage:** 152 tests across 9 test files:
 - Protocol encoding/decoding
 - Database operations
 - Test profiles and serialization
 - Alert conditions
 - CSV/JSON export
 - PX100 protocol (legacy)
+- DP832A SCPI protocol, LAN driver, and charge termination state machine
 
 ## Cross-Platform Compatibility
 
@@ -270,6 +282,7 @@ See [TODO.md](TODO.md) for items being worked on.
 
 ## Documentation
 
+- **CHANGELOG.md** - Notable changes per release
 - **CLAUDE.md** - Development guide and architecture documentation
 - **TODO.md** - Roadmap and known issues
 - **Protocol Documentation:** https://www.improwis.com/projects/sw_dl24/

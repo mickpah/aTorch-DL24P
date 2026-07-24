@@ -24,6 +24,14 @@
   - Alignment between database storage and JSON export format
 - Consider migration strategy for existing `tests.db` files
 
+### Battery Charging (Rigol DP832A)
+The v1 "Battery Charging" tab is manual charge control only. Deferred:
+- Charge-curve plotting and database logging of charge sessions
+- Automated charge → rest → discharge cycle testing (DP832A + DL24 coordination)
+- Battery chemistry presets for charge voltage/current
+- Async (non-blocking) connect — `RigolDP832A.connect()` currently blocks the GUI thread up to ~2 s
+- Retire the duplicate `pyinstaller` entry in runtime dependencies (it belongs only in the `dev` extra)
+
 ### Future Enhancements
 - Export to Excel format improvements
 - Historical data comparison/overlay features
