@@ -36,6 +36,10 @@ class DischargeCore:
     def start(self, now_s: float) -> None:
         self._started_at = now_s
 
+    def shift(self, delta_s: float) -> None:
+        """Shift the reference clock forward - pause compensation."""
+        self._started_at += delta_s
+
     def update(self, status, now_s: float, voltage_override: Optional[float] = None) -> DischargeOutcome:
         if self.max_duration_s is not None and now_s - self._started_at >= self.max_duration_s:
             return DischargeOutcome.TIMEOUT
@@ -86,6 +90,10 @@ class TimedCore:
 
     def start(self, now_s: float) -> None:
         self._started_at = now_s
+
+    def shift(self, delta_s: float) -> None:
+        """Shift the reference clock forward - pause compensation."""
+        self._started_at += delta_s
 
     def update(self, status, now_s: float, voltage_override: Optional[float] = None) -> TimedOutcome:
         if self.voltage_cutoff is not None and status is not None:
@@ -145,6 +153,10 @@ class SteppedCore:
         self._in_rest = False
         self._mark = now_s
         return self.steps[0][0]
+
+    def shift(self, delta_s: float) -> None:
+        """Shift the reference clock forward - pause compensation."""
+        self._mark += delta_s
 
     def update(self, status, now_s: float, voltage_override: Optional[float] = None) -> SteppedUpdate:
         if self.voltage_cutoff is not None and status is not None:

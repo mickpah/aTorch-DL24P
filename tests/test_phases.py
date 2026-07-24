@@ -63,7 +63,7 @@ class TestDischargePhase:
     def test_pause_and_resume(self):
         phase, load = self.make(), FakeLoad()
         phase.on_enter(ctx_with(load), now_s=0.0)
-        phase.on_pause(ctx_with(load))
+        phase.on_pause(ctx_with(load), now_s=5.0)
         assert load.on is False
         assert phase.on_resume(ctx_with(load), now_s=10.0) is True
         assert load.on is True
@@ -73,6 +73,22 @@ class TestDischargePhase:
         phase.on_enter(ctx_with(load), now_s=0.0)
         phase.on_exit(ctx_with(load), reason="voltage_cutoff")
         assert load.on is False
+
+    def test_pause_time_does_not_count_toward_max_duration(self):
+        """Wall-clock time spent paused must not consume the run budget."""
+        phase = build_phase(
+            PhaseSpec("discharge", {"current_a": 1.0, "voltage_cutoff": 3.0,
+                                    "max_duration_s": 100.0})
+        )
+        load = FakeLoad()
+        phase.on_enter(ctx_with(load), now_s=0.0)
+        load.status = LoadStatus()
+        phase.on_pause(ctx_with(load), now_s=50.0)
+        assert phase.on_resume(ctx_with(load), now_s=250.0) is True  # 200 s paused
+        assert phase.tick(ctx_with(load), now_s=290.0) is CONTINUE   # 90 s run time
+        tick = phase.tick(ctx_with(load), now_s=300.0)               # 100 s run time
+        assert tick.done is True
+        assert tick.result.reason == "timeout"
 
 
 class TestRestPhase:
@@ -171,6 +187,19 @@ class TestSteppedPhase:
                                   "divisions": 4, "dwell_s": 10.0})
         )
         assert phase._core.total_steps == 5
+
+    def test_pause_does_not_expire_the_current_dwell(self):
+        """A long pause must not instantly advance the sweep on resume."""
+        phase = self.make()
+        load = FakeLoad()
+        phase.on_enter(ctx_with(load), now_s=0.0)
+        load.status = LoadStatus()
+        phase.on_pause(ctx_with(load), now_s=6.0)
+        assert phase.on_resume(ctx_with(load), now_s=106.0) is True
+        update = phase.tick(ctx_with(load), now_s=108.0)  # 8 s of dwell elapsed
+        assert update is CONTINUE
+        update = phase.tick(ctx_with(load), now_s=110.0)  # 10 s of dwell elapsed
+        assert ("set_current", 1.0) in load.calls
 
 
 class TestBuildPhase:

@@ -63,6 +63,7 @@ class Phase(ABC):
 
     def __init__(self, spec: PhaseSpec) -> None:
         self.spec = spec
+        self._paused_at: Optional[float] = None
 
     @abstractmethod
     def on_enter(self, ctx: PhaseContext, now_s: float) -> bool:
@@ -72,12 +73,18 @@ class Phase(ABC):
     def tick(self, ctx: PhaseContext, now_s: float) -> PhaseTick:
         """One non-blocking decision step."""
 
-    def on_pause(self, ctx: PhaseContext) -> None:
+    def on_pause(self, ctx: PhaseContext, now_s: float) -> None:
+        self._paused_at = now_s
         if ctx.load is not None:
             ctx.load.turn_off()
 
     def on_resume(self, ctx: PhaseContext, now_s: float) -> bool:
         return True
+
+    def _shift_after_pause(self, now_s: float) -> None:
+        if self._paused_at is not None:
+            self._core.shift(now_s - self._paused_at)
+            self._paused_at = None
 
     def on_exit(self, ctx: PhaseContext, reason: str) -> None:
         if ctx.load is not None:
@@ -141,6 +148,7 @@ class DischargePhase(Phase):
         )
 
     def on_resume(self, ctx: PhaseContext, now_s: float) -> bool:
+        self._shift_after_pause(now_s)
         load = ctx.load
         if load is None:
             return False
@@ -172,7 +180,7 @@ class RestPhase(Phase):
             )
         return CONTINUE
 
-    def on_pause(self, ctx: PhaseContext) -> None:
+    def on_pause(self, ctx: PhaseContext, now_s: float) -> None:
         return None  # nothing running
 
 
@@ -216,6 +224,7 @@ class TimedPhase(Phase):
         )
 
     def on_resume(self, ctx: PhaseContext, now_s: float) -> bool:
+        self._shift_after_pause(now_s)
         load = ctx.load
         if load is None:
             return False
@@ -330,6 +339,7 @@ class SteppedPhase(Phase):
         )
 
     def on_resume(self, ctx: PhaseContext, now_s: float) -> bool:
+        self._shift_after_pause(now_s)
         index = min(self._core.current_step, self._core.total_steps - 1)
         ok = self._apply_value(ctx, self._core.steps[index][0])
         return ctx.load.turn_on() and ok
