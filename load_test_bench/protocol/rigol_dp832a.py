@@ -87,6 +87,8 @@ class RigolDP832A:
     def disconnect(self) -> None:
         if self._transport is not None:
             self._transport.disconnect()
+            self._transport = None
+        self._host = None
 
     def set_voltage(self, volts: float) -> bool:
         return self._command(DP832AProtocol.cmd_set_voltage(self._channel, volts))

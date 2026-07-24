@@ -91,6 +91,16 @@ class TestCommands:
         device = RigolDP832A()
         assert device.output_off() is False
 
+    def test_disconnect_drops_the_transport(self):
+        """After disconnect a stale, host-bound transport must never be
+        reused - the next connect() has to build a fresh one, so a changed
+        host cannot silently dial the old instrument."""
+        device = make_device()
+        device.disconnect()
+        assert device._transport is None
+        assert device.host is None
+        assert device.output_off() is False  # no transport -> command dropped
+
 
 class TestPolling:
     def test_poll_once_builds_status(self):

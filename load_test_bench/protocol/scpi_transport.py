@@ -124,7 +124,7 @@ class ScpiTransport:
             raise ScpiError(f"No SCPI response from {describe}: {e}") from e
         if not verify_idn(idn):
             self._link.close()
-            raise ScpiError(f"Unexpected instrument at {describe}: {idn!r}")
+            raise ScpiError(f"Unexpected instrument for {describe}: {idn!r}")
         self._identity = idn.strip()
         self._connected = True
 
