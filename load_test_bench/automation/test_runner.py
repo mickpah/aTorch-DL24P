@@ -57,7 +57,9 @@ class TestProgress:
     message: str = ""
 
 
-def profile_to_spec(profile: TestProfile, battery_name: str, notes: str) -> JobSpec:
+def profile_to_spec(
+    profile: TestProfile, battery_name: str, notes: str, voltage_source: str = "device"
+) -> JobSpec:
     """Translate a legacy TestProfile into a declarative JobSpec."""
     if isinstance(profile, DischargeProfile):
         params = {
@@ -100,6 +102,15 @@ def profile_to_spec(profile: TestProfile, battery_name: str, notes: str) -> JobS
         phases, job_type = (PhaseSpec("stepped", params),), "stepped"
     else:
         raise ValueError(f"Unknown profile type: {type(profile).__name__}")
+
+    if voltage_source == "meter":
+        phases = tuple(
+            PhaseSpec(p.phase_type, {**p.params, "voltage_source": "meter"})
+            if p.phase_type != "rest"
+            else p
+            for p in phases
+        )
+
     return JobSpec(
         name=profile.name,
         job_type=job_type,
@@ -114,6 +125,7 @@ class TestRunner:
         self.device = device  # panels read .device.is_connected
         self.database = database
         self._engine = engine
+        self.voltage_source = "device"  # "device" | "meter"; set by MainWindow
         self._job_id: Optional[int] = None
         self._is_cycle_job = False
         self._total_cycles = 1
@@ -149,7 +161,7 @@ class TestRunner:
         if self.device is None or not self.device.is_connected:
             return False
         try:
-            spec = profile_to_spec(profile, battery_name, notes)
+            spec = profile_to_spec(profile, battery_name, notes, self.voltage_source)
         except ValueError:
             return False
         try:

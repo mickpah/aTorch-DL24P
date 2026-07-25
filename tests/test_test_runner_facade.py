@@ -82,8 +82,9 @@ class Harness:
         self.load = FakeLoad()
         self.load.status = LoadStatus()
         self.registry.register("load", self.load)
+        self.ledger = JobLedger(self.db)
         self.executor = JobExecutor(
-            ledger=JobLedger(self.db),
+            ledger=self.ledger,
             registry=self.registry,
             database=self.db,
             settle=lambda seconds: None,
@@ -106,6 +107,46 @@ def harness(tmp_path):
     h = Harness(tmp_path)
     yield h
     h.close()
+
+
+class TestMeterCutoffSourcing:
+    def test_profile_to_spec_defaults_to_device_voltage(self):
+        spec = profile_to_spec(DischargeProfile(name="d"), "", "")
+        assert "voltage_source" not in spec.phases[0].params
+
+    def test_meter_source_marks_discharge_phase(self):
+        spec = profile_to_spec(
+            DischargeProfile(name="d"), "", "", voltage_source="meter"
+        )
+        assert spec.phases[0].params["voltage_source"] == "meter"
+
+    def test_meter_source_marks_timed_and_stepped(self):
+        timed = profile_to_spec(TimedProfile(name="t"), "", "", voltage_source="meter")
+        assert timed.phases[0].params["voltage_source"] == "meter"
+        stepped = profile_to_spec(
+            SteppedProfile(name="s", steps=[{"current_a": 0.5, "duration_s": 10}]),
+            "", "", voltage_source="meter",
+        )
+        assert stepped.phases[0].params["voltage_source"] == "meter"
+
+    def test_cycle_rest_phases_are_not_marked(self):
+        spec = profile_to_spec(
+            CycleProfile(name="c", num_cycles=2), "", "", voltage_source="meter"
+        )
+        by_type = {p.phase_type: p for p in spec.phases}
+        assert by_type["discharge"].params["voltage_source"] == "meter"
+        assert "voltage_source" not in by_type["rest"].params
+
+    def test_start_threads_runner_voltage_source(self, harness):
+        """TestRunner.voltage_source flows into the submitted job's phases."""
+        harness.runner.voltage_source = "meter"
+        harness.runner.start(DischargeProfile(name="d", voltage_cutoff=3.0))
+        harness.run(0.0, 1.0)
+        job_id = harness.runner._job_id
+        spec = harness.ledger.get_job(job_id)
+        import json
+        params = json.loads(spec["spec_json"])["phases"][0]["params"]
+        assert params["voltage_source"] == "meter"
 
 
 class TestFacadeLifecycle:
