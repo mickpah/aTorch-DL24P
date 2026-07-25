@@ -5,7 +5,6 @@ Settings persist in settings.json (see config.MeterSettings). The dialog owns
 no device state - it drives the shared ScpiMeter passed in by MainWindow.
 """
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -103,13 +102,21 @@ class VoltageMonitorDialog(QDialog):
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(widget)
         form.addRow(label, container)
+        container._form_label = form.labelForField(container)
         return container
 
     def _update_transport_rows(self):
         is_usb = self.transport_combo.currentData() == "usb"
-        self.serial_row.setVisible(is_usb)
-        self.host_row.setVisible(not is_usb)
-        self.port_row.setVisible(not is_usb)
+        self._set_row_visible(self.serial_row, is_usb)
+        self._set_row_visible(self.host_row, not is_usb)
+        self._set_row_visible(self.port_row, not is_usb)
+
+    @staticmethod
+    def _set_row_visible(container, visible):
+        container.setVisible(visible)
+        label = getattr(container, "_form_label", None)
+        if label is not None:
+            label.setVisible(visible)
 
     def _load(self):
         s = load_meter_settings(self._settings_file)
