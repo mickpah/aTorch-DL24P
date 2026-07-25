@@ -37,15 +37,18 @@ class ScpiMeter:
 
     @property
     def is_connected(self) -> bool:
-        return self._transport.is_connected if self._transport else False
+        transport = self._transport
+        return transport.is_connected if transport else False
 
     @property
     def identity(self) -> str:
-        return self._transport.identity if self._transport else ""
+        transport = self._transport
+        return transport.identity if transport else ""
 
     @property
     def last_status(self) -> Optional[MeterStatus]:
-        return self._transport.last_status if self._transport else None
+        transport = self._transport
+        return transport.last_status if transport else None
 
     @property
     def profile(self) -> Optional[MeterProfile]:
@@ -81,7 +84,9 @@ class ScpiMeter:
         self._profile = profile
         self._apply_callbacks()
         for command in profile.setup_commands:
-            transport.command(command)
+            if not transport.command(command):
+                transport.disconnect()
+                raise MeterError(f"Failed to configure meter: {command}")
         transport.start_polling(self._poll_once)
         return True
 

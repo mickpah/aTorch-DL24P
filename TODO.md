@@ -58,6 +58,10 @@ The v1 "Battery Charging" tab is manual charge control only. Deferred:
 - Meter aux-voltage logging on the manual DL24 control-panel logging path
 - Custom instrument-profile authoring UI (currently profiles are code-defined)
 - Closed-loop charge-voltage compensation against the meter (PSU setpoint trim)
+- Reject SCPI overrange sentinels (e.g. 9.9E+37) in parse_measurement with a plausibility clamp
+- Meter connect blocks the GUI thread up to ~4 s (socket + *IDN?); consider async connect
+- Connecting the meter registers/logs it even when "enabled" is unchecked (enabled gates only autoconnect + cutoff) — document or gate
+- UsbScpiLink sets no serial write_timeout; a wedged CDC device can park the poll thread until disconnect
 
 ---
 

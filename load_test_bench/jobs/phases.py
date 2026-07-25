@@ -97,6 +97,21 @@ class Phase(ABC):
         status = ctx.meter.last_status
         return status.voltage_v if status is not None else None
 
+    # When the meter sources cutoff, program the load's own hardware cutoff
+    # BELOW the meter target so the meter-based decision fires first (the load
+    # reads lower than the true battery under cable drop). The device cutoff is
+    # then only a crash-time backstop. The backoff must exceed the cable IR
+    # drop for the meter cutoff to take precedence.
+    DEVICE_CUTOFF_BACKOFF_V = 0.5
+    MIN_DEVICE_CUTOFF_V = 0.1
+
+    def _device_cutoff(self, target_cutoff: float) -> float:
+        """The hardware cutoff to program. Unchanged in device mode; lowered to
+        a crash-only backstop when the meter sources the cutoff."""
+        if self.spec.params.get("voltage_source") == "meter":
+            return max(target_cutoff - self.DEVICE_CUTOFF_BACKOFF_V, self.MIN_DEVICE_CUTOFF_V)
+        return target_cutoff
+
     @staticmethod
     def _metrics(status) -> dict:
         if status is None:
@@ -127,7 +142,7 @@ class DischargePhase(Phase):
         ctx.settle(0.5)
         ok = load.set_current(self._current_a) and ok
         ctx.settle(0.5)
-        ok = load.set_voltage_cutoff(self._voltage_cutoff) and ok
+        ok = load.set_voltage_cutoff(self._device_cutoff(self._voltage_cutoff)) and ok
         ctx.settle(0.5)
         ok = load.turn_on() and ok
         if ok:
@@ -203,7 +218,7 @@ class TimedPhase(Phase):
         ok = load.set_current(self._current_a) and ok
         if self._voltage_cutoff is not None:
             ctx.settle(0.5)
-            ok = load.set_voltage_cutoff(self._voltage_cutoff) and ok
+            ok = load.set_voltage_cutoff(self._device_cutoff(self._voltage_cutoff)) and ok
         ctx.settle(0.5)
         ok = load.turn_on() and ok
         if ok:
@@ -288,7 +303,7 @@ class SteppedPhase(Phase):
         ok = load.reset_counters()
         if self._voltage_cutoff is not None:
             ctx.settle(0.5)
-            ok = load.set_voltage_cutoff(self._voltage_cutoff) and ok
+            ok = load.set_voltage_cutoff(self._device_cutoff(self._voltage_cutoff)) and ok
         ctx.settle(0.5)
         first_value = self._core.start(now_s)
         ok = self._apply_value(ctx, first_value) and ok

@@ -202,6 +202,31 @@ class TestSteppedPhase:
         assert ("set_current", 1.0) in load.calls
 
 
+class TestMeterCutoffBackstop:
+    def test_device_mode_programs_exact_cutoff(self):
+        """Without the meter, the load cutoff equals the target (unchanged)."""
+        phase = build_phase(PhaseSpec("discharge", {"current_a": 1.0, "voltage_cutoff": 3.0}))
+        load = FakeLoad()
+        phase.on_enter(ctx_with(load), now_s=0.0)
+        assert ("set_voltage_cutoff", 3.0) in load.calls
+
+    def test_meter_mode_lowers_device_cutoff_to_backstop(self):
+        """Meter-sourced cutoff programs the load cutoff below the target so the
+        meter decision fires first."""
+        phase = build_phase(PhaseSpec("discharge",
+            {"current_a": 1.0, "voltage_cutoff": 3.0, "voltage_source": "meter"}))
+        load = FakeLoad()
+        phase.on_enter(ctx_with(load), now_s=0.0)
+        assert ("set_voltage_cutoff", 2.5) in load.calls
+
+    def test_backstop_floored_for_low_targets(self):
+        phase = build_phase(PhaseSpec("discharge",
+            {"current_a": 1.0, "voltage_cutoff": 0.3, "voltage_source": "meter"}))
+        load = FakeLoad()
+        phase.on_enter(ctx_with(load), now_s=0.0)
+        assert ("set_voltage_cutoff", 0.1) in load.calls
+
+
 class TestBuildPhase:
     def test_unknown_type_rejected(self):
         with pytest.raises(ValueError):

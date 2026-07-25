@@ -455,9 +455,9 @@ class DP832AChargerPanel(QWidget):
         finally:
             self._loading_settings = False
 
-    def set_meter_voltage(self, voltage_v: float) -> None:
-        """Show the independent meter's battery-terminal voltage (from MainWindow)."""
-        self.meter_voltage_label.setText(f"{voltage_v:.3f} V")
+    def set_meter_voltage(self, voltage_v) -> None:
+        """Show the meter's battery-terminal voltage (from MainWindow); None = lost/absent."""
+        self.meter_voltage_label.setText("--" if voltage_v is None else f"{voltage_v:.3f} V")
 
     # --- app shutdown ---
 

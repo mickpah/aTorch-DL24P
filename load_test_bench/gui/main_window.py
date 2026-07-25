@@ -44,7 +44,7 @@ from ..data.database import Database
 from ..data.models import TestSession, Reading
 from ..data.export import export_csv, export_json, export_excel
 from ..automation.test_runner import TestRunner, TestProgress
-from ..config import get_data_dir, load_meter_settings, save_meter_settings
+from ..config import get_data_dir, load_meter_settings
 from ..protocol.scpi_meter import ScpiMeter
 from .voltage_monitor_dialog import VoltageMonitorDialog
 from ..alerts.notifier import Notifier
@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
     recovery_safe_result = Signal(str)  # startup make-safe outcome for the statusbar
     test_completed = Signal(object)  # marshal job-engine test completion onto the GUI thread
     meter_status_updated = Signal(object)  # MeterStatus, marshalled to the GUI thread
+    meter_error = Signal(str)  # meter poll failure, marshalled to the GUI thread
 
     DEBUG_LOG_FILE = str(Path(__file__).resolve().parents[2] / "debug.log")
 
@@ -127,6 +128,8 @@ class MainWindow(QMainWindow):
         self.meter = ScpiMeter()
         self.meter.set_status_callback(self.meter_status_updated.emit)
         self.meter_status_updated.connect(self._on_meter_status)
+        self.meter.set_error_callback(self.meter_error.emit)
+        self.meter_error.connect(self._on_meter_error)
 
         self.safety_rules = SafetyRules(self._load_safety_config())
         self.safety_supervisor = SafetySupervisor(
@@ -4416,13 +4419,26 @@ class MainWindow(QMainWindow):
         self.meter_label.setVisible(self.meter.is_connected)
         if not self.meter.is_connected:
             self.meter_label.setText("")
+            self.dp832a_charger_panel.set_meter_voltage(None)
 
     @Slot(object)
     def _on_meter_status(self, status) -> None:
+        if not self.meter.is_connected:
+            return  # a status frame queued just before a disconnect
         self.meter_label.setText(f"Meter: {status.voltage_v:.3f} V")
         self.meter_label.show()
         # Forward to the charger panel's live readout.
         self.dp832a_charger_panel.set_meter_voltage(status.voltage_v)
+
+    @Slot(str)
+    def _on_meter_error(self, message: str) -> None:
+        # A meter poll failed - mark the readout stale rather than showing a
+        # frozen last-good voltage. The engine falls back to the load's own
+        # voltage automatically (conservative early cutoff).
+        if self.meter.is_connected:
+            self.meter_label.setText("Meter: LOST — check connection")
+            self.meter_label.show()
+        self.dp832a_charger_panel.set_meter_voltage(None)
 
     def _maybe_autoconnect_meter(self) -> None:
         settings = load_meter_settings(get_data_dir() / "settings.json")

@@ -97,3 +97,23 @@ class TestConnect:
         meter = ScpiMeter()
         assert meter.last_status is None
         assert meter.is_connected is False
+
+    def test_connect_raises_when_setup_command_fails(self):
+        """A failed setup command (e.g. bad CONFigure) must not connect silently -
+        a misconfigured meter could report the wrong quantity as voltage."""
+        import pytest
+
+        from load_test_bench.protocol.scpi_meter import MeterError
+
+        class FailingSetupLink(FakeLink):
+            def send(self, data):
+                cmd = data.decode("ascii").strip()
+                if cmd == ":DMM:CONFigure:VOLTage DC":
+                    raise OSError("simulated I/O failure")
+                super().send(data)
+
+        link = FailingSetupLink()
+        meter = ScpiMeter()
+        with pytest.raises(MeterError):
+            meter.connect_lan("10.0.0.9", 5555, METER_PROFILES["hds200"], _link=link)
+        assert meter.is_connected is False
