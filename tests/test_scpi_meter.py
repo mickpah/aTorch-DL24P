@@ -117,3 +117,6 @@ class TestConnect:
         with pytest.raises(MeterError):
             meter.connect_lan("10.0.0.9", 5555, METER_PROFILES["hds200"], _link=link)
         assert meter.is_connected is False
+        # The stale transport must be cleared so a retry builds a fresh one
+        # (a retry may target a different port/host).
+        assert meter._transport is None

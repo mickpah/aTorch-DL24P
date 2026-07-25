@@ -86,6 +86,10 @@ class ScpiMeter:
         for command in profile.setup_commands:
             if not transport.command(command):
                 transport.disconnect()
+                # Clear the stale transport so a retry (possibly a new
+                # port/host) builds a fresh one instead of reusing this link.
+                self._transport = None
+                self._profile = None
                 raise MeterError(f"Failed to configure meter: {command}")
         transport.start_polling(self._poll_once)
         return True
