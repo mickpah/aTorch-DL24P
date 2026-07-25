@@ -7,6 +7,7 @@ Users can override the directory via Preferences > Database.
 
 import json
 import shutil
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -149,3 +150,46 @@ def _migrate_legacy(target: Path) -> None:
         except OSError:
             # Best-effort migration — skip files that fail
             pass
+
+
+@dataclass
+class MeterSettings:
+    """Optional SCPI voltage-meter connection settings."""
+
+    enabled: bool = False
+    transport: str = "usb"  # "usb" | "lan"
+    serial_port: str = ""
+    host: str = ""
+    lan_port: int = 5555
+    profile_key: str = "hds200"
+    use_for_cutoff: bool = False
+
+
+def load_meter_settings(settings_path) -> MeterSettings:
+    """Read the 'meter' key of settings.json, merged over defaults."""
+    defaults = MeterSettings()
+    try:
+        with open(settings_path) as f:
+            stored = json.load(f).get("meter", {})
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    merged = {**asdict(defaults), **stored}
+    # Only keep known fields so a stale/foreign key can't break construction.
+    known = {f: merged[f] for f in asdict(defaults) if f in merged}
+    return MeterSettings(**known)
+
+
+def save_meter_settings(settings_path, settings: MeterSettings) -> None:
+    """Write settings under the 'meter' key, preserving other top-level keys."""
+    data = {}
+    try:
+        with open(settings_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    data["meter"] = asdict(settings)
+    try:
+        with open(settings_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass
