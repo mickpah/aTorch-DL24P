@@ -336,3 +336,63 @@ class TestExportJSON:
         assert "\n" in content
         # And spaces for indentation
         assert "  " in content
+
+
+class TestAuxVoltageExport:
+    """Meter aux voltage appears in exports, blank/null when absent."""
+
+    def _session_with(self, aux):
+        from datetime import datetime
+
+        from load_test_bench.data.models import Reading, TestSession
+
+        session = TestSession(name="aux", start_time=datetime(2026, 1, 1, 10, 0, 0))
+        session.readings = [
+            Reading(
+                timestamp=datetime(2026, 1, 1, 10, 0, 1),
+                voltage_v=3.70, current_a=1.0, power_w=3.70, energy_wh=0.5,
+                capacity_mah=500.0, mosfet_temp_c=40, ext_temp_c=25,
+                aux_voltage_v=aux,
+            )
+        ]
+        return session
+
+    def test_csv_has_aux_column_with_value(self, tmp_path):
+        from load_test_bench.data.export import export_csv
+
+        path = tmp_path / "out.csv"
+        export_csv(self._session_with(3.812), path)
+        text = path.read_text()
+        # Find the header line (first non-comment line)
+        header_line = [line for line in text.splitlines() if not line.startswith("#")][0]
+        assert "aux_voltage_V" in header_line
+        assert "3.812" in text
+
+    def test_csv_blank_when_no_meter(self, tmp_path):
+        from load_test_bench.data.export import export_csv
+
+        path = tmp_path / "out.csv"
+        export_csv(self._session_with(None), path)
+        text = path.read_text()
+        # header present, value cell empty
+        header_line = [line for line in text.splitlines() if not line.startswith("#")][0]
+        assert "aux_voltage_V" in header_line
+
+    def test_json_has_aux_key(self, tmp_path):
+        import json
+
+        from load_test_bench.data.export import export_json
+
+        path = tmp_path / "out.json"
+        export_json(self._session_with(3.812), path)
+        data = json.loads(path.read_text())
+        assert data["readings"][0]["aux_voltage_v"] == 3.812
+
+    def test_json_aux_null_when_absent(self, tmp_path):
+        import json
+
+        from load_test_bench.data.export import export_json
+
+        path = tmp_path / "out.json"
+        export_json(self._session_with(None), path)
+        assert json.loads(path.read_text())["readings"][0]["aux_voltage_v"] is None

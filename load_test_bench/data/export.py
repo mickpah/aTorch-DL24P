@@ -42,6 +42,7 @@ def export_csv(session: TestSession, path: Union[str, Path]) -> None:
             "capacity_mAh",
             "temp_C",
             "ext_temp_C",
+            "aux_voltage_V",
         ])
 
         # Write readings
@@ -62,6 +63,7 @@ def export_csv(session: TestSession, path: Union[str, Path]) -> None:
                 f"{reading.capacity_mah:.1f}",
                 reading.mosfet_temp_c,
                 reading.ext_temp_c,
+                "" if reading.aux_voltage_v is None else f"{reading.aux_voltage_v:.3f}",
             ])
 
 
@@ -102,6 +104,7 @@ def export_json(session: TestSession, path: Union[str, Path]) -> None:
             "capacity_mah": reading.capacity_mah,
             "mosfet_temp_c": reading.mosfet_temp_c,
             "ext_temp_c": reading.ext_temp_c,
+            "aux_voltage_v": reading.aux_voltage_v,
         })
 
     with open(path, "w") as f:
@@ -140,6 +143,7 @@ def export_excel(session: TestSession, path: Union[str, Path]) -> None:
             "Capacity (mAh)": reading.capacity_mah,
             "Temperature (°C)": reading.mosfet_temp_c,
             "Ext Temperature (°C)": reading.ext_temp_c,
+            "aux_voltage_V": reading.aux_voltage_v,
         })
 
     df = pd.DataFrame(data)
