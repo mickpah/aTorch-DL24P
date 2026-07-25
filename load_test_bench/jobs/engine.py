@@ -322,7 +322,9 @@ class JobExecutor:
         status = load.last_status if load is not None else None
         if status is None:
             return
-        # aux_voltage_v stays NULL until the meter driver lands (see spec)
+        meter = self._registry.meter
+        meter_status = meter.last_status if meter is not None else None
+        aux_voltage_v = meter_status.voltage_v if meter_status is not None else None
         reading = Reading(
             timestamp=datetime.now(),
             voltage_v=status.voltage_v,
@@ -336,6 +338,7 @@ class JobExecutor:
             load_r_ohm=getattr(status, "load_r_ohm", None),
             battery_r_ohm=getattr(status, "battery_r_ohm", None),
             runtime_s=getattr(status, "runtime_seconds", 0),
+            aux_voltage_v=aux_voltage_v,
         )
         self._reading_sink(self._phase_session.id, reading)
         self._last_reading_s = now_s

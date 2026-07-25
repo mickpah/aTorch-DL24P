@@ -277,3 +277,33 @@ class TestEngineShutdown:
 
         assert harness.ledger.get_job(job_id)["state"] == "STOPPED"
         assert harness.load.on is False
+
+
+class TestMeterCapture:
+    def test_reading_carries_meter_voltage(self, tmp_path):
+        """When a meter is registered, its voltage is logged as aux_voltage_v."""
+        from load_test_bench.jobs.devices import MeterStatus
+        from tests.fakes import FakeMeter
+
+        harness = Harness(tmp_path)
+        try:
+            meter = FakeMeter()
+            meter.status = MeterStatus(voltage_v=3.815)
+            harness.registry.register("meter", meter)
+            harness.executor.submit(discharge_spec())
+            harness.run(0.0, 3.0)
+            assert harness.readings, "expected at least one reading"
+            _, reading = harness.readings[0]
+            assert reading.aux_voltage_v == 3.815
+        finally:
+            harness.close()
+
+    def test_reading_aux_none_without_meter(self, tmp_path):
+        harness = Harness(tmp_path)
+        try:
+            harness.executor.submit(discharge_spec())
+            harness.run(0.0, 3.0)
+            _, reading = harness.readings[0]
+            assert reading.aux_voltage_v is None
+        finally:
+            harness.close()
