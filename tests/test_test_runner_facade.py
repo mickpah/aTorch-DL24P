@@ -154,3 +154,22 @@ class TestFacadeLifecycle:
         harness.run(0.0, 2.0)
         assert harness.runner.progress.total_cycles == 2
         assert harness.runner.progress.current_cycle == 1
+
+    def test_start_refused_while_stop_is_winding_down(self, harness):
+        """A non-blocking stop() must not allow a new start() to orphan the
+        old job's terminal snapshot."""
+        harness.runner.start(DischargeProfile(name="d"))
+        harness.run(0.0, 1.0)
+        harness.runner.stop()
+        # Engine has not ticked yet - old job still in flight
+        assert harness.runner.start(DischargeProfile(name="d2")) is False
+        harness.run(2.0, 3.0)  # terminal snapshot arrives, _job_id cleared
+        assert harness.runner.start(DischargeProfile(name="d3")) is True
+
+    def test_device_stopped_maps_to_voltage_cutoff(self, harness):
+        """Device-side auto-stop keeps its legacy VOLTAGE_CUTOFF semantics."""
+        harness.runner.start(DischargeProfile(name="d", voltage_cutoff=3.0))
+        harness.run(0.0, 2.0)
+        harness.load.status = LoadStatus(load_on=False)  # device stopped itself
+        harness.run(4.0, 6.0)  # past the 3 s device-stop grace
+        assert harness.runner.state == TestState.VOLTAGE_CUTOFF

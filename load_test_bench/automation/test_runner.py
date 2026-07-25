@@ -142,7 +142,9 @@ class TestRunner:
         self._complete_callback = callback
 
     def start(self, profile: TestProfile, battery_name: str = "", notes: str = "") -> bool:
-        if self.is_running:
+        if self.is_running or self._job_id is not None:
+            # A job is still winding down (e.g. non-blocking stop() awaiting
+            # its terminal snapshot) - refuse until it fully finishes.
             return False
         if self.device is None or not self.device.is_connected:
             return False
@@ -214,7 +216,7 @@ class TestRunner:
         if snapshot.state == JobState.PENDING:
             return TestState.STARTING
         if snapshot.state == JobState.COMPLETED:
-            if "voltage_cutoff" in snapshot.message:
+            if "voltage_cutoff" in snapshot.message or "device_stopped" in snapshot.message:
                 return TestState.VOLTAGE_CUTOFF
             if "timeout" in snapshot.message:
                 return TestState.TIMEOUT
