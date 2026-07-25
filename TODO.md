@@ -1,67 +1,99 @@
 # TODO
 
-## Pending Features
+## Pending Features (prioritized)
 
-### PyInstaller Builds
-- Windows build not yet tested
-- Consider code signing for macOS distribution
+Priority tiers, most important first. P0 = do before relying on the newly
+merged features on real hardware; P1 = highest-value next work; P2 = depth and
+robustness; P3 = polish / speculative. Last reprioritized 2026-07-25 after the
+job engine (Stage 0-1) and SCPI voltage meter merged.
 
-### Pre-Test Reset Sequence
-- Before each test starts, turn off the load and wait 5 seconds to ensure a known state
-- Sequence: load off → reset counters (mAh, Wh, time) → wait 5s → then proceed with test start
-- Applies to all test panels (Battery Capacity, Battery Load, Battery Charger, Charger Load, Power Bank)
-- This ensures consistent starting conditions regardless of what the device was doing before
-- Show countdown in status label during the wait (e.g. "Preparing... 5s")
+### P0 — Verify before real use
 
-### Database Schema Overhaul
-- **Issue**: The current database schema and how it's populated are out of sync with how data logging actually works
-- The schema was designed early on and hasn't kept pace with changes to the logging pipeline (bounded deque, commit batching, test panel types, etc.)
-- Needs a full review of:
-  - Table structure (sessions, readings) — do they match current test types and data flow?
-  - How sessions are created, updated, and finalized across all test panels
-  - Which fields are actually populated vs left empty/stale
-  - Whether the schema supports all current test types (battery capacity, battery load, battery charger, charger load, power bank)
-  - Alignment between database storage and JSON export format
-- Consider migration strategy for existing `tests.db` files
+- **HDS200 hardware bring-up & verification** — the SCPI voltage meter shipped
+  and unit-tested, but its behavior against a real OWON HDS200 is unconfirmed.
+  Verify on the bench: the DMM command sequence (`:DMM:CONFigure:VOLTage DC`,
+  `:DMM:AUTO ON`, `:DMM:MEAS?`), the real `*IDN?` string (adjust the `hds200`
+  profile's `idn_contains`, or fall back to the `generic_scpi_dmm` profile if it
+  doesn't match), the USB serial port/baud, and the measure-response format that
+  `parse_measurement` sees. Then confirm the cable-drop cutoff actually governs:
+  with the meter enabled-for-cutoff, a discharge should run until the *true*
+  battery voltage hits the target (device backstop = target − 0.5 V should not
+  fire first). Blocks trusting the meter feature end to end.
+- **Meter measurement plausibility clamp** — reject SCPI overrange sentinels
+  (e.g. `9.9E+37`) and out-of-range values in `parse_measurement` (e.g. clamp to
+  0–1000 V) so garbage never lands in `aux_voltage_v` or acts as an
+  always-above-cutoff override. Cheap; do it with the P0 bring-up.
 
-### Battery Charging (Rigol DP832A)
-The v1 "Battery Charging" tab is manual charge control only. Deferred:
-- Charge-curve plotting and database logging of charge sessions
-- Automated charge → rest → discharge cycle testing (DP832A + DL24 coordination)
-- Battery chemistry presets for charge voltage/current
-- Async (non-blocking) connect — `RigolDP832A.connect()` currently blocks the GUI thread up to ~2 s
-- Retire the duplicate `pyinstaller` entry in runtime dependencies (it belongs only in the `dev` extra)
+### P1 — Highest-value next
 
-### Future Enhancements
-- Export to Excel format improvements
-- Historical data comparison/overlay features
-- Gzip-compressed JSON (.json.gz) for smaller session files (built-in `gzip` module, 70-90% compression)
-- **Clean up parameter naming above the chart** - Review and standardize the labels and units displayed in the control/status area above the plot panel for better clarity and consistency
-- **Consider moving Status indicator (ON/OFF) next to Load on/off switch** - May improve UI flow by grouping related controls/indicators together in the Control Panel instead of keeping status in Live Readings panel
-- **Standardize reading parameter naming and add missing parameters**
-  - Review and clean up parameter names in DeviceStatus dataclass and throughout codebase
-  - Ensure consistent naming conventions (e.g., voltage vs V, current vs I, capacity_mah vs capacity)
-  - Add missing parameters that device provides but aren't currently exposed
-  - Update JSON export schema to use standardized names
-  - Consider backwards compatibility for existing JSON test files
-  - Document parameter naming conventions in CLAUDE.md
+- **Safety-trip push notifications** (spec §5.5 step 4) — an over-temp / stale /
+  over-current trip on an unattended run currently only cuts outputs + shows a
+  GUI banner; fire `alerts/notifier.py` (ntfy/pushover) with the confirmed
+  output state. Highest-value safety gap for a battery-heating rig left running.
+- **Charge → rest → discharge cycle testing** (DP832A + DL24 coordination) — the
+  headline capability the job engine was built to enable, now unblocked. Add a
+  cycle-test UI that builds charge/rest/discharge JobSpecs.
+- **Complete meter coverage** — the meter today only feeds the engine/facade
+  discharge path (Battery Capacity, Power Bank). Extend cutoff + aux logging to:
+  the pre-engine panel sweeps (Battery Load, Charger Load — arrives when they
+  migrate to the job engine), and the manual DL24 control-panel logging path.
+- **`JobEngine.shutdown()` join-timeout overlap** — if the 5 s join times out,
+  the final synchronous make-safe step can overlap a still-running engine
+  thread; check `is_alive()` after join and skip/warn instead.
+- **Database Schema Overhaul** — the migration framework now exists
+  (`PRAGMA user_version` + `_MIGRATIONS` in `database.py`, added by the job
+  engine), so the mechanism is no longer the blocker. Remaining work:
+  - Reconcile `sessions`/`readings` structure with the current logging pipeline
+    (bounded deque, commit batching, engine job_phases, per-test-type fields)
+  - Audit which fields are actually populated vs left empty/stale across panels
+  - Align DB storage with the JSON export schema
+  - Migration path for existing `tests.db` files (now straightforward via the
+    versioned migration list)
 
-### Job Engine follow-ups
-- Safety-trip push notifications via alerts/notifier (spec §5.5 step 4 — currently GUI banner only)
-- TimedPhase: re-arm the device hardware timer as a device-side backstop (old TestRunner used set_timer)
-- `JobEngine.shutdown()`: if the 5 s join times out, the final synchronous step can overlap the stuck engine thread — check `is_alive()` after join and skip/warn instead
-- Facade lost-stop window: a stop clicked between `start()` returning and the engine's pickup tick is discarded (clear `_stop_requested` in `_finish_job` instead of pickup); moot when the facade dies in Stage 5
+### P2 — Depth & robustness
 
-### Voltage Meter follow-ups
-- Meter cutoff/logging for the pre-engine panel sweeps (Battery Load, Charger
-  Load) — arrives when those panels migrate to the job engine
-- Meter aux-voltage logging on the manual DL24 control-panel logging path
-- Custom instrument-profile authoring UI (currently profiles are code-defined)
-- Closed-loop charge-voltage compensation against the meter (PSU setpoint trim)
-- Reject SCPI overrange sentinels (e.g. 9.9E+37) in parse_measurement with a plausibility clamp
-- Meter connect blocks the GUI thread up to ~4 s (socket + *IDN?); consider async connect
-- Connecting the meter registers/logs it even when "enabled" is unchecked (enabled gates only autoconnect + cutoff) — document or gate
-- UsbScpiLink sets no serial write_timeout; a wedged CDC device can park the poll thread until disconnect
+- **Charge-curve plotting + DB logging of charge sessions** — the DP832A
+  "Battery Charging" tab is manual control only; log readings + plot the curve
+  (needs a charge session flowing through the DB pipeline).
+- **Async (non-blocking) connect** — meter connect blocks the GUI thread up to
+  ~4 s (socket + `*IDN?`), `RigolDP832A.connect()` up to ~2 s. Move off the GUI
+  thread so an unreachable host at startup doesn't stall the app.
+- **Pre-test reset sequence, consistent across panels** — before each test:
+  load off → reset counters (mAh, Wh, time) → wait 5 s → start, with a countdown
+  in the status label ("Preparing… 5s"). The engine phases already reset
+  counters on enter; unify the panel-driven paths to match.
+- **TimedPhase device-timer backstop** — re-arm the device hardware timer as a
+  device-side stop (the old TestRunner used `set_timer`); lost when the phase
+  model replaced it.
+- **Battery chemistry presets for charge voltage/current** (DP832A charging).
+- **`UsbScpiLink` write timeout** — set a serial `write_timeout` so a wedged CDC
+  device can't park the poll thread in `write()` until disconnect.
+- **Meter "enabled" gating** — connecting the meter registers + logs it even when
+  the "enable" checkbox is unchecked (enabled currently gates only autoconnect +
+  cutoff). Document the "connected ⇒ logged" behavior, or gate registration on it.
+
+### P3 — Polish & speculative
+
+- **Standardize reading parameter naming** (larger cleanup):
+  - Clean up names in `DeviceStatus` and throughout (voltage vs V, current vs I,
+    capacity_mah vs capacity)
+  - Expose device-provided parameters not currently surfaced
+  - Update the JSON export schema to standardized names (with back-compat for
+    existing JSON files) and document conventions in CLAUDE.md
+- **Export / data**: Excel export improvements; gzip-compressed JSON
+  (`.json.gz`, ~70–90% smaller via stdlib `gzip`); historical comparison/overlay.
+- **UI tweaks**: move the ON/OFF status indicator next to the Load on/off switch;
+  clean up parameter naming/units in the control-status area above the plot.
+- **Custom instrument-profile authoring UI** — meter profiles are code-defined
+  today; a UI would let users add SCPI instruments without editing code.
+- **Closed-loop charge-voltage compensation** against the meter (trim the PSU
+  setpoint to hit the true battery voltage) — complex, speculative.
+- **Facade lost-stop window** — a stop clicked between `start()` returning and the
+  engine's pickup tick is discarded; clear `_stop_requested` in `_finish_job`
+  instead of at pickup. Moot once the TestRunner facade is removed (Stage 5).
+- **PyInstaller**: retire the duplicate `pyinstaller` runtime dependency (belongs
+  only in the `dev` extra — trivial); test the Windows build; consider macOS code
+  signing.
 
 ---
 
@@ -118,6 +150,33 @@ The v1 "Battery Charging" tab is manual charge control only. Deferred:
 ---
 
 ## Resolved Issues
+
+### SCPI Voltage Meter - DONE (2026-07-25)
+- Optional SCPI DMM (OWON HDS200 over USB, or any SCPI voltmeter over USB/LAN via
+  profiles) senses true battery-terminal voltage to mitigate cable IR drop
+- `aux_voltage_v` logged with every engine reading, exported to CSV/JSON/Excel
+- Meter voltage can source discharge cutoff (Battery Capacity / Power Bank); the
+  device hardware cutoff drops to a crash-only backstop so the meter governs;
+  conservative fallback to the load's voltage when the meter drops out
+- Device → "Voltage Monitor…" dialog; settings persist under the `meter` key
+- Follow-ups tracked above (P0 hardware bring-up, P1 coverage completion)
+
+### Durable Job Engine, Stage 0-1 - DONE (2026-07-25)
+- One Qt-free engine replacing the hand-rolled test runners behind a compatibility
+  facade; declarative multi-phase jobs (discharge/rest/timed/stepped)
+- SQLite job ledger + `PRAGMA user_version` migration framework in `tests.db`
+- Startup detect-and-make-safe crash recovery (orphaned runs finalized, outputs
+  forced off, never resumed)
+- Actuating latching SafetySupervisor (over-temp, PSU current, stale-status);
+  thresholds via the `safety` key in settings.json
+- Link-agnostic `ScpiTransport` (LAN + USB)
+- Follow-ups tracked above (safety notifications, cycle testing, shutdown edge)
+
+### Battery Charging (Rigol DP832A) - DONE (2026-07-24)
+- "Battery Charging" tab: CC-CV charging via a DP832A over LAN (SCPI, port 5555)
+- Configurable termination current + safety timeout; auto OVP at Vset + 0.1 V
+- Output-off retry with front-panel warning; faults on lost network contact
+- Follow-ups tracked above (charge-curve logging, chemistry presets, cycle testing)
 
 ### Package Rename - DONE (2026-02-19)
 - Renamed Python package from `atorch/` to `load_test_bench/`
