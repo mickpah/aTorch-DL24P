@@ -21,6 +21,7 @@ class Reading:
     load_r_ohm: Optional[float] = None
     battery_r_ohm: Optional[float] = None
     runtime_s: int = 0
+    aux_voltage_v: Optional[float] = None  # independent meter voltage (cable-drop mitigation)
     id: Optional[int] = None
     session_id: Optional[int] = None
     # Device setpoint information (parameters sent to tester)
@@ -46,6 +47,7 @@ class Reading:
             "load_r_ohm": self.load_r_ohm,
             "battery_r_ohm": self.battery_r_ohm,
             "runtime_s": self.runtime_s,
+            "aux_voltage_v": self.aux_voltage_v,
             # Load configuration fields (always included, may be null)
             "load_mode": self.load_mode,
             "set_current_a": self.set_current_a,

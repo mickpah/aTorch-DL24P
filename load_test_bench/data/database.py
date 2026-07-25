@@ -286,8 +286,8 @@ class Database:
             INSERT INTO readings
             (session_id, timestamp, voltage, current, power, energy_wh,
              capacity_mah, temperature_c, ext_temperature_c, fan_speed_rpm,
-             load_r_ohm, battery_r_ohm, runtime_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             load_r_ohm, battery_r_ohm, runtime_seconds, aux_voltage_v)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -303,6 +303,7 @@ class Database:
                 reading.load_r_ohm,
                 reading.battery_r_ohm,
                 reading.runtime_s,       # Map new attribute to old column name
+                reading.aux_voltage_v,
             ),
         )
         if commit:
@@ -329,8 +330,8 @@ class Database:
             INSERT INTO readings
             (session_id, timestamp, voltage, current, power, energy_wh,
              capacity_mah, temperature_c, ext_temperature_c, fan_speed_rpm,
-             load_r_ohm, battery_r_ohm, runtime_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             load_r_ohm, battery_r_ohm, runtime_seconds, aux_voltage_v)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -347,6 +348,7 @@ class Database:
                     r.load_r_ohm,
                     r.battery_r_ohm,
                     r.runtime_s,       # Map new attribute to old column name
+                    r.aux_voltage_v,
                 )
                 for r in readings
             ],
@@ -410,6 +412,7 @@ class Database:
                     load_r_ohm=row["load_r_ohm"] if "load_r_ohm" in row.keys() else None,
                     battery_r_ohm=row["battery_r_ohm"] if "battery_r_ohm" in row.keys() else None,
                     runtime_s=row["runtime_seconds"], # Map old column to new attribute
+                    aux_voltage_v=row["aux_voltage_v"] if "aux_voltage_v" in row.keys() else None,
                 )
             )
 
