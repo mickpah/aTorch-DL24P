@@ -287,6 +287,7 @@ class SteppedPhase(Phase):
             return False
         ok = load.reset_counters()
         if self._voltage_cutoff is not None:
+            ctx.settle(0.5)
             ok = load.set_voltage_cutoff(self._voltage_cutoff) and ok
         ctx.settle(0.5)
         first_value = self._core.start(now_s)

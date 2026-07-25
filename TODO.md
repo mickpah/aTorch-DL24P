@@ -49,6 +49,8 @@ The v1 "Battery Charging" tab is manual charge control only. Deferred:
 ### Job Engine follow-ups
 - Safety-trip push notifications via alerts/notifier (spec §5.5 step 4 — currently GUI banner only)
 - TimedPhase: re-arm the device hardware timer as a device-side backstop (old TestRunner used set_timer)
+- `JobEngine.shutdown()`: if the 5 s join times out, the final synchronous step can overlap the stuck engine thread — check `is_alive()` after join and skip/warn instead
+- Facade lost-stop window: a stop clicked between `start()` returning and the engine's pickup tick is discarded (clear `_stop_requested` in `_finish_job` instead of pickup); moot when the facade dies in Stage 5
 
 ---
 

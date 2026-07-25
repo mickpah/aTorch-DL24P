@@ -457,7 +457,7 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 
 ## Test Coverage
 
-274 tests total across 20 test files:
+279 tests total across 20 test files:
 - `test_protocol.py` (14) - Atorch protocol encoding/decoding
 - `test_database.py` (13) - SQLite operations and models
 - `test_profiles.py` (11) - Test profile serialization
@@ -475,8 +475,8 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 - `test_scpi_transport.py` (10) - link-agnostic ScpiTransport
 - `test_phase_cores.py` (17) - pure discharge/rest/timed/stepped decision FSMs
 - `test_phases.py` (17) - phase actuation shells + `PHASE_TYPES` registry
-- `test_safety.py` (14) - SafetyRules thresholds + latching SafetySupervisor
-- `test_job_executor.py` (10) - thread-free JobExecutor `step(now_s)` orchestration
+- `test_safety.py` (16) - SafetyRules thresholds + latching SafetySupervisor
+- `test_job_executor.py` (13) - thread-free JobExecutor `step(now_s)` orchestration
 - `test_test_runner_facade.py` (12) - TestRunner compatibility facade over the engine
 
 Run with: `uv run --extra dev pytest -v`
