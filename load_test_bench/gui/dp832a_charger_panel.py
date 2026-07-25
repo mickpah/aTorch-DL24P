@@ -40,10 +40,12 @@ class DP832AChargerPanel(QWidget):
     charger_status = Signal(object)  # ChargerStatus
     charger_error = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, registry=None, supervisor=None):
         super().__init__(parent)
+        self._registry = registry
+        self._supervisor = supervisor
         self.charger = RigolDP832A()
-        self.charger.set_status_callback(self.charger_status.emit)
+        self.charger.set_status_callback(self._on_poll_status)
         self.charger.set_error_callback(self.charger_error.emit)
 
         self._monitor: Optional[ChargeMonitor] = None
@@ -69,6 +71,12 @@ class DP832AChargerPanel(QWidget):
 
         self.charger_status.connect(self._on_charger_status)
         self.charger_error.connect(self._on_charger_error)
+
+    def _on_poll_status(self, status) -> None:
+        """Poll-thread hook: safety observation first, then marshal to GUI."""
+        if self._supervisor is not None:
+            self._supervisor.observe_psu(status, time.monotonic())
+        self.charger_status.emit(status)
 
     # --- UI construction ---
 
@@ -182,6 +190,8 @@ class DP832AChargerPanel(QWidget):
         if self.charger.is_connected:
             self._stop_if_charging()
             self._output_off_retry_timer.stop()
+            if self._registry is not None:
+                self._registry.unregister("psu")
             self.charger.disconnect()
             self._set_connected_ui(False)
             return
@@ -197,6 +207,8 @@ class DP832AChargerPanel(QWidget):
             return
         self.identity_label.setText(self.charger.identity)
         self._set_connected_ui(True)
+        if self._registry is not None:
+            self._registry.register("psu", self.charger)
 
     @Slot(int)
     def _on_channel_changed(self, index: int) -> None:
@@ -456,4 +468,6 @@ class DP832AChargerPanel(QWidget):
                     break
                 if attempt < 2:
                     time.sleep(0.5)
+        if self._registry is not None:
+            self._registry.unregister("psu")
         self.charger.disconnect()

@@ -164,6 +164,28 @@ over its LAN interface (raw SCPI on TCP port 5555, stdlib socket - no VISA).
   safety timeout is unenforceable without connectivity, so size the
   instrument-side voltage/current/OVP limits accordingly
 
+### Job Engine (`load_test_bench/jobs/`)
+
+Durable job execution (spec: `docs/superpowers/specs/2026-07-24-job-engine-design.md`).
+The package is Qt-free - it is the testability boundary and the Prefect seam.
+
+- `model.py` - JobSpec/PhaseSpec (declarative, JSON-round-trip), JobState/PhaseState
+- `ledger.py` - jobs/job_phases tables in tests.db (PRAGMA user_version migrations
+  in `data/database.py`); heartbeat every 5 s while running
+- `recovery.py` - startup detect + make-safe: orphaned jobs/sessions finalized as
+  INTERRUPTED (data kept, never resumed), outputs forced off best-effort
+- `cores.py` / `phases.py` - pure decision FSMs + thin actuation shells;
+  new phase types register in `PHASE_TYPES` (domain-neutral engine)
+- `safety.py` - actuating SafetySupervisor (over-temp, PSU current ceiling,
+  stale-status watchdog); latching; separate from notify-only `alerts/`;
+  thresholds via a `safety` key in settings.json
+- `engine.py` - thread-free JobExecutor driven by `step(now_s)` (tests use a
+  fake clock) + JobEngine daemon thread; ALL device commands during jobs run
+  on the engine thread
+- `gui/job_bridge.py` - the only Qt↔jobs file
+- `automation/test_runner.py` is now a compatibility facade over the engine
+  (same public surface; deleted in Stage 5)
+
 ## Key Files
 
 - `load_test_bench/protocol/device.py` - USB HID communication, packet building, response parsing
@@ -435,7 +457,7 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 
 ## Test Coverage
 
-150 tests total across 9 test files:
+274 tests total across 20 test files:
 - `test_protocol.py` (14) - Atorch protocol encoding/decoding
 - `test_database.py` (13) - SQLite operations and models
 - `test_profiles.py` (11) - Test profile serialization
@@ -443,7 +465,18 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 - `test_export.py` (20) - CSV and JSON export
 - `test_px100_protocol.py` (30) - PX100 protocol commands/parsing
 - `test_dp832a_protocol.py` (17) - DP832A SCPI build/parse
-- `test_rigol_dp832a.py` (7) - DP832A LAN driver (fake socket)
+- `test_rigol_dp832a.py` (10) - DP832A LAN driver (fake socket)
 - `test_charge_monitor.py` (8) - CC-CV charge termination state machine
+- `test_migrations.py` (8) - `tests.db` PRAGMA user_version schema migrations
+- `test_job_model.py` (6) - JobSpec/PhaseSpec JSON round-trip, JobState/PhaseState
+- `test_job_ledger.py` (10) - jobs/job_phases ledger tables, heartbeat
+- `test_devices.py` (9) - DeviceRegistry role registration/lookup
+- `test_recovery.py` (8) - startup orphan detection + make-safe
+- `test_scpi_transport.py` (10) - link-agnostic ScpiTransport
+- `test_phase_cores.py` (17) - pure discharge/rest/timed/stepped decision FSMs
+- `test_phases.py` (17) - phase actuation shells + `PHASE_TYPES` registry
+- `test_safety.py` (14) - SafetyRules thresholds + latching SafetySupervisor
+- `test_job_executor.py` (10) - thread-free JobExecutor `step(now_s)` orchestration
+- `test_test_runner_facade.py` (12) - TestRunner compatibility facade over the engine
 
 Run with: `uv run --extra dev pytest -v`

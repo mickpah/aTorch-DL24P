@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -34,6 +35,10 @@ from ..protocol.atorch_protocol import DeviceStatus
 from ..protocol.rigol_dp832a import RigolDP832A
 from ..jobs.ledger import JobLedger
 from ..jobs.recovery import finalize_orphans, make_safe
+from ..jobs.devices import DeviceRegistry
+from ..jobs.engine import JobEngine, JobExecutor
+from ..jobs.safety import SafetyConfig, SafetyRules, SafetySupervisor
+from .job_bridge import JobEngineBridge
 from .control_panel import ConnectionType
 from ..data.database import Database
 from ..data.models import TestSession, Reading
@@ -106,9 +111,15 @@ class MainWindow(QMainWindow):
         self._serial_device = Device()  # Serial device instance
         self._hid_device = USBHIDDevice() if USBHIDDevice.is_available() else None
         self.database = Database()
-        self.test_runner = None  # Created after device selection
         self._test_viewer_process = None  # Track Test Viewer process
         self.notifier = Notifier()
+
+        # Job engine collaborators needed by panels (engine itself starts later)
+        self.device_registry = DeviceRegistry()
+        self.safety_rules = SafetyRules(self._load_safety_config())
+        self.safety_supervisor = SafetySupervisor(
+            self.safety_rules, on_trip=self._on_safety_trip
+        )
 
         # Debug window
         self.debug_window = DebugWindow(self)
@@ -156,6 +167,38 @@ class MainWindow(QMainWindow):
         self.job_ledger = JobLedger(self.database)
         self.recovery_safe_result.connect(self.statusbar.showMessage)
         self._run_startup_recovery()
+
+        self.job_executor = JobExecutor(
+            ledger=self.job_ledger,
+            registry=self.device_registry,
+            database=self.database,
+            reading_sink=self._enqueue_job_reading,
+            supervisor=self.safety_supervisor,
+        )
+        self.job_engine = JobEngine(self.job_executor)
+        self.job_bridge = JobEngineBridge(self.job_executor, parent=self)
+        self.job_bridge.safety_tripped.connect(self._show_safety_banner)
+        self.job_engine.start()
+
+        # Compatibility facade - created ONCE; device assigned on connect
+        self.test_runner = TestRunner(None, self.database, self.job_engine)
+        self.test_runner.set_progress_callback(self._on_test_progress)
+        self.test_runner.set_complete_callback(self._on_test_complete)
+        self.control_panel.test_runner = self.test_runner
+        self.battery_capacity_panel.test_runner = self.test_runner
+        self.power_bank_panel.test_runner = self.test_runner
+
+        # Safety banner lives in the statusbar (red, hidden until a trip)
+        self.safety_banner = QLabel("")
+        self.safety_banner.setStyleSheet(
+            "color: white; background-color: #b71c1c; padding: 2px 8px; border-radius: 3px;"
+        )
+        self.safety_banner.hide()
+        self.safety_reset_button = QPushButton("Reset Safety Lockout")
+        self.safety_reset_button.hide()
+        self.safety_reset_button.clicked.connect(self._on_safety_reset)
+        self.statusbar.addPermanentWidget(self.safety_banner)
+        self.statusbar.addPermanentWidget(self.safety_reset_button)
 
         # Load and apply tooltip preference
         tooltips_enabled = self._load_tooltip_preference()
@@ -488,7 +531,9 @@ class MainWindow(QMainWindow):
         charger_idx = self.bottom_tabs.addTab(self.battery_charger_panel, "Battery Charger Output")
         self.bottom_tabs.setTabToolTip(charger_idx, "Monitor and log battery charging sessions")
 
-        self.dp832a_charger_panel = DP832AChargerPanel()
+        self.dp832a_charger_panel = DP832AChargerPanel(
+            registry=self.device_registry, supervisor=self.safety_supervisor
+        )
         dp832a_idx = self.bottom_tabs.addTab(self.dp832a_charger_panel, "Battery Charging")
         self.bottom_tabs.setTabToolTip(
             dp832a_idx, "Charge a battery using a Rigol DP832A power supply (LAN)"
@@ -800,13 +845,9 @@ class MainWindow(QMainWindow):
             # Connect
             self.device.connect(port)
 
-            # Create/update test runner with connected device
-            self.test_runner = TestRunner(self.device, self.database)
-            self.test_runner.set_progress_callback(self._on_test_progress)
-            self.test_runner.set_complete_callback(self._on_test_complete)
-            self.control_panel.test_runner = self.test_runner
-            self.battery_capacity_panel.test_runner = self.test_runner
-            self.power_bank_panel.test_runner = self.test_runner
+            # Register the connected device with the job engine and facade
+            self.device_registry.register("load", self.device)
+            self.test_runner.device = self.device
 
             # Set device and plot references for test panels
             self.battery_load_panel.set_device_and_plot(self.device, self.plot_panel)
@@ -846,6 +887,7 @@ class MainWindow(QMainWindow):
         self.battery_load_panel.set_device_and_plot(None, None)
         self.charger_panel.set_device_and_plot(None, None)
         self.battery_charger_panel.set_device_and_plot(None, None)
+        self.device_registry.unregister("load")
 
         # Disconnect
         if self.device:
@@ -3512,6 +3554,8 @@ class MainWindow(QMainWindow):
         IMPORTANT: This runs in a background thread - only emit signals here,
         do NOT access GUI elements or perform database operations directly.
         """
+        # Safety observation must never be skipped, even under signal-queue backpressure
+        self.safety_supervisor.observe_load(status, time.monotonic())
         # Skip if still processing previous update (prevents signal queue buildup)
         if self._processing_status:
             return
@@ -4254,6 +4298,58 @@ class MainWindow(QMainWindow):
             + describe("DP832A", psu_ok)
         )
 
+    def _load_safety_config(self) -> SafetyConfig:
+        """Safety thresholds from settings.json's 'safety' key (defaults otherwise).
+
+        A Settings-dialog Safety tab arrives with Stage 2+; until then the
+        file key is the override mechanism.
+        """
+        try:
+            with open(get_data_dir() / "settings.json") as f:
+                data = json.load(f).get("safety", {})
+        except Exception:
+            data = {}
+        config = SafetyConfig()
+        for key in (
+            "mosfet_temp_max_c",
+            "ext_temp_max_c",
+            "psu_current_max_a",
+            "stale_status_timeout_s",
+            "temp_hysteresis_c",
+        ):
+            if key in data:
+                setattr(config, key, data[key])
+        return config
+
+    def _enqueue_job_reading(self, session_id: int, reading) -> None:
+        """Engine-thread reading sink into the existing background DB writer."""
+        try:
+            self._db_queue.put_nowait((session_id, reading))
+        except Exception:
+            pass  # queue full - drop rather than block the engine
+
+    def _on_safety_trip(self, reason: str) -> None:
+        """Called from a device poll thread - wake the engine, signal the GUI."""
+        self.job_engine.wake()
+        self.job_bridge.safety_tripped.emit(reason)
+
+    @Slot(str)
+    def _show_safety_banner(self, reason: str) -> None:
+        self.safety_banner.setText(f"SAFETY TRIP: {reason}")
+        self.safety_banner.show()
+        self.safety_reset_button.show()
+
+    @Slot()
+    def _on_safety_reset(self) -> None:
+        if self.safety_supervisor.try_reset():
+            self.safety_banner.hide()
+            self.safety_reset_button.hide()
+            self.statusbar.showMessage("Safety lockout cleared")
+        else:
+            self.statusbar.showMessage(
+                "Cannot reset - safety condition still present"
+            )
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close."""
         if self.test_runner and self.test_runner.is_running:
@@ -4287,6 +4383,7 @@ class MainWindow(QMainWindow):
         except:
             pass
 
+        self.job_engine.shutdown()
         self.dp832a_charger_panel.shutdown()
 
         if self.device:
