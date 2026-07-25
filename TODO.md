@@ -52,6 +52,13 @@ The v1 "Battery Charging" tab is manual charge control only. Deferred:
 - `JobEngine.shutdown()`: if the 5 s join times out, the final synchronous step can overlap the stuck engine thread — check `is_alive()` after join and skip/warn instead
 - Facade lost-stop window: a stop clicked between `start()` returning and the engine's pickup tick is discarded (clear `_stop_requested` in `_finish_job` instead of pickup); moot when the facade dies in Stage 5
 
+### Voltage Meter follow-ups
+- Meter cutoff/logging for the pre-engine panel sweeps (Battery Load, Charger
+  Load) — arrives when those panels migrate to the job engine
+- Meter aux-voltage logging on the manual DL24 control-panel logging path
+- Custom instrument-profile authoring UI (currently profiles are code-defined)
+- Closed-loop charge-voltage compensation against the meter (PSU setpoint trim)
+
 ---
 
 ## Known Issues

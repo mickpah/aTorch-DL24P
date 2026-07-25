@@ -21,6 +21,9 @@ Both applications are designed for battery testing, characterization, and qualit
 - Live monitoring of voltage, current, power, temperature, capacity, and energy
 - Four load modes: Constant Current (CC), Constant Power (CP), Constant Voltage (CV), Constant Resistance (CR)
 
+**Voltage Monitor:**
+- **Voltage Monitor** - Optional SCPI meter senses true battery-terminal voltage (mitigates cable drop); logs `aux_voltage_v` and can drive discharge cutoff
+
 **Test Panels:**
 - **Battery Capacity** - Discharge tests with voltage cutoff and time limits
 - **Battery Load** - Load curve characterization (current/power/resistance sweep)
@@ -85,6 +88,7 @@ Both applications are designed for battery testing, characterization, and qualit
     - Each blade is equivalent to a 2.8mm spade terminal
     - Note: SV5.5-5 is a cable cross-section rating, not a lug dimension — verify actual lug dimensions before ordering
 - **Optional hardware:** Rigol DP832A power supply on the same LAN (raw SCPI, TCP port 5555) for battery charging
+- **Optional hardware:** SCPI voltage meter for cable-drop mitigation — OWON HDS200 (USB) or any SCPI DMM (USB or LAN)
 
 ## Installation
 

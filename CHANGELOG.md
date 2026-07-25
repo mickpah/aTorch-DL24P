@@ -30,6 +30,12 @@ Changes prior to this file's introduction are recorded in the git history.
   `docs/superpowers/`
 - 129 new tests (schema migrations, job model/ledger, device fakes,
   recovery, SCPI transport, phase cores/shells, safety, executor, facade)
+- **Optional SCPI voltage meter** — sense true battery-terminal voltage with an
+  OWON HDS200 (USB) or any SCPI DMM (USB or LAN) to mitigate cable voltage drop.
+  The meter voltage is logged with every reading (`aux_voltage_v`, exported in
+  CSV/JSON/Excel) and can override the load-measured voltage for discharge
+  cutoff. Configured via Device → Voltage Monitor; instruments are added as
+  profiles.
 
 - **Battery Charging tab** — charge batteries from a Rigol DP832A bench power
   supply over its LAN interface (raw SCPI on TCP port 5555, stdlib socket, no

@@ -164,6 +164,34 @@ over its LAN interface (raw SCPI on TCP port 5555, stdlib socket - no VISA).
   safety timeout is unenforceable without connectivity, so size the
   instrument-side voltage/current/OVP limits accordingly
 
+### SCPI Voltage Meter (cable-drop mitigation)
+
+Optional. An SCPI DMM (OWON HDS200 over USB by default, or any SCPI voltmeter
+over USB/LAN) senses true battery-terminal voltage to mitigate cable IR drop
+measured at the load/PSU.
+
+- `protocol/scpi_transport.py` - `UsbScpiLink` (pyserial CDC) joins `LanScpiLink`
+  under the same `ScpiTransport`; `list_serial_ports()` for the UI
+- `protocol/meter_protocol.py` - `MeterProfile` + `METER_PROFILES` (built-ins:
+  `hds200` DMM subsystem, `generic_scpi_dmm` standard `MEAS:VOLT:DC?`);
+  `parse_measurement`, `make_idn_verifier`. Add an instrument = add a profile.
+- `protocol/scpi_meter.py` - `ScpiMeter` (duck-types the `MeterDevice` role);
+  read-only, so NOT wired into the SafetySupervisor
+- Engine: `_capture_reading` logs the registered meter's voltage as
+  `readings.aux_voltage_v` (column from migration 1); exported in CSV/JSON/Excel
+- Cutoff sourcing: when the meter is enabled + "use for cutoff" + connected,
+  `TestRunner.voltage_source = "meter"` stamps `voltage_source: "meter"` on
+  discharge/timed/stepped phase params; `Phase._meter_voltage` then overrides the
+  load's own reading. Falls back to the load voltage (conservative early cutoff)
+  if the meter drops out.
+- GUI: Device → "Voltage Monitor…" (`voltage_monitor_dialog.py`) configures and
+  connects; settings persist under the `meter` key of settings.json
+  (`config.MeterSettings`); a status-bar readout and the charger panel show live
+  battery-terminal voltage
+- Scope: cutoff sourcing covers the engine/facade discharge path (Battery
+  Capacity, Power Bank). The pre-engine panel sweeps and the manual-logging path
+  are future work; closed-loop charge compensation is out of scope.
+
 ### Job Engine (`load_test_bench/jobs/`)
 
 Durable job execution (spec: `docs/superpowers/specs/2026-07-24-job-engine-design.md`).
@@ -457,12 +485,12 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 
 ## Test Coverage
 
-279 tests total across 20 test files:
+323 tests total across 25 test files:
 - `test_protocol.py` (14) - Atorch protocol encoding/decoding
 - `test_database.py` (13) - SQLite operations and models
 - `test_profiles.py` (11) - Test profile serialization
 - `test_alerts.py` (30) - Alert conditions (voltage, temp, capacity, etc.)
-- `test_export.py` (20) - CSV and JSON export
+- `test_export.py` (24) - CSV and JSON export
 - `test_px100_protocol.py` (30) - PX100 protocol commands/parsing
 - `test_dp832a_protocol.py` (17) - DP832A SCPI build/parse
 - `test_rigol_dp832a.py` (10) - DP832A LAN driver (fake socket)
@@ -476,7 +504,12 @@ Key insight: Use QThreadPool with QRunnable for heavy operations, or implement r
 - `test_phase_cores.py` (17) - pure discharge/rest/timed/stepped decision FSMs
 - `test_phases.py` (17) - phase actuation shells + `PHASE_TYPES` registry
 - `test_safety.py` (16) - SafetyRules thresholds + latching SafetySupervisor
-- `test_job_executor.py` (13) - thread-free JobExecutor `step(now_s)` orchestration
-- `test_test_runner_facade.py` (12) - TestRunner compatibility facade over the engine
+- `test_job_executor.py` (15) - thread-free JobExecutor `step(now_s)` orchestration
+- `test_test_runner_facade.py` (17) - TestRunner compatibility facade over the engine
+- `test_usb_scpi_link.py` (6) - USB CDC SCPI link
+- `test_meter_protocol.py` (11) - meter profiles + measurement parsing
+- `test_scpi_meter.py` (6) - profile-driven SCPI meter driver
+- `test_aux_voltage_persistence.py` (5) - aux voltage in the readings table
+- `test_meter_config.py` (5) - meter settings persistence
 
 Run with: `uv run --extra dev pytest -v`
