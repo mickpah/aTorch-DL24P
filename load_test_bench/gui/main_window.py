@@ -44,7 +44,9 @@ from ..data.database import Database
 from ..data.models import TestSession, Reading
 from ..data.export import export_csv, export_json, export_excel
 from ..automation.test_runner import TestRunner, TestProgress
-from ..config import get_data_dir
+from ..config import get_data_dir, load_meter_settings, save_meter_settings
+from ..protocol.scpi_meter import ScpiMeter
+from .voltage_monitor_dialog import VoltageMonitorDialog
 from ..alerts.notifier import Notifier
 from ..alerts.conditions import (
     VoltageAlert,
@@ -78,6 +80,7 @@ class MainWindow(QMainWindow):
     prepare_needed = Signal()  # device needs USB prepare (no response detected)
     recovery_safe_result = Signal(str)  # startup make-safe outcome for the statusbar
     test_completed = Signal(object)  # marshal job-engine test completion onto the GUI thread
+    meter_status_updated = Signal(object)  # MeterStatus, marshalled to the GUI thread
 
     DEBUG_LOG_FILE = str(Path(__file__).resolve().parents[2] / "debug.log")
 
@@ -117,6 +120,14 @@ class MainWindow(QMainWindow):
 
         # Job engine collaborators needed by panels (engine itself starts later)
         self.device_registry = DeviceRegistry()
+
+        # Optional SCPI voltage meter (cable-drop mitigation). Read-only; not
+        # wired into the safety supervisor. Registered in device_registry when
+        # connected so the engine logs its voltage and can source cutoff from it.
+        self.meter = ScpiMeter()
+        self.meter.set_status_callback(self.meter_status_updated.emit)
+        self.meter_status_updated.connect(self._on_meter_status)
+
         self.safety_rules = SafetyRules(self._load_safety_config())
         self.safety_supervisor = SafetySupervisor(
             self.safety_rules, on_trip=self._on_safety_trip
@@ -202,6 +213,11 @@ class MainWindow(QMainWindow):
         self.statusbar.addPermanentWidget(self.safety_banner)
         self.statusbar.addPermanentWidget(self.safety_reset_button)
 
+        self.meter_label = QLabel("")
+        self.meter_label.setToolTip("SCPI voltage meter (battery-terminal sense)")
+        self.meter_label.hide()
+        self.statusbar.addPermanentWidget(self.meter_label)
+
         # Load and apply tooltip preference
         tooltips_enabled = self._load_tooltip_preference()
         self.tooltips_action.setChecked(tooltips_enabled)
@@ -225,6 +241,8 @@ class MainWindow(QMainWindow):
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._on_timer)
         self._update_timer.start(100)  # 10 Hz UI updates
+
+        self._maybe_autoconnect_meter()
 
     def _setup_alerts(self) -> None:
         """Configure default alert conditions."""
@@ -693,6 +711,13 @@ class MainWindow(QMainWindow):
         debug_action = QAction("View Li&ve Logs", self)
         debug_action.triggered.connect(self._show_debug_window)
         device_menu.addAction(debug_action)
+
+        device_menu.addSeparator()
+
+        voltage_monitor_action = QAction("Voltage &Monitor…", self)
+        voltage_monitor_action.setMenuRole(QAction.NoRole)
+        voltage_monitor_action.triggered.connect(self._show_voltage_monitor)
+        device_menu.addAction(voltage_monitor_action)
 
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
@@ -4367,6 +4392,57 @@ class MainWindow(QMainWindow):
                 "Cannot reset - safety condition still present"
             )
 
+    def _show_voltage_monitor(self) -> None:
+        dialog = VoltageMonitorDialog(self, self.meter, self._on_meter_settings_changed)
+        dialog.exec()
+        # Reflect any connect/disconnect the dialog performed.
+        self._apply_meter_registration()
+
+    def _on_meter_settings_changed(self, settings) -> None:
+        self._apply_meter_registration()
+
+    def _apply_meter_registration(self) -> None:
+        """Register/deregister the meter and set the cutoff source to match."""
+        settings = load_meter_settings(get_data_dir() / "settings.json")
+        if self.meter.is_connected:
+            self.device_registry.register("meter", self.meter)
+        else:
+            self.device_registry.unregister("meter")
+        use_meter = (
+            settings.enabled and settings.use_for_cutoff and self.meter.is_connected
+        )
+        if self.test_runner is not None:
+            self.test_runner.voltage_source = "meter" if use_meter else "device"
+        self.meter_label.setVisible(self.meter.is_connected)
+        if not self.meter.is_connected:
+            self.meter_label.setText("")
+
+    @Slot(object)
+    def _on_meter_status(self, status) -> None:
+        self.meter_label.setText(f"Meter: {status.voltage_v:.3f} V")
+        self.meter_label.show()
+        # Forward to the charger panel's live readout.
+        self.dp832a_charger_panel.set_meter_voltage(status.voltage_v)
+
+    def _maybe_autoconnect_meter(self) -> None:
+        settings = load_meter_settings(get_data_dir() / "settings.json")
+        if not settings.enabled:
+            return
+        from ..protocol.meter_protocol import METER_PROFILES
+        from ..protocol.scpi_meter import MeterError
+
+        profile = METER_PROFILES.get(settings.profile_key)
+        if profile is None:
+            return
+        try:
+            if settings.transport == "usb" and settings.serial_port:
+                self.meter.connect_usb(settings.serial_port, profile)
+            elif settings.transport == "lan" and settings.host:
+                self.meter.connect_lan(settings.host, settings.lan_port, profile)
+        except MeterError:
+            return  # meter absent at startup - user can retry via the dialog
+        self._apply_meter_registration()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close."""
         if self.test_runner and self.test_runner.is_running:
@@ -4393,6 +4469,7 @@ class MainWindow(QMainWindow):
         # final reading enqueued during its deterministic make-safe step is
         # still consumed rather than dropped into a dead queue.
         self.job_engine.shutdown()
+        self.meter.disconnect()
         self.dp832a_charger_panel.shutdown()
 
         # Stop background writer threads

@@ -174,6 +174,9 @@ class DP832AChargerPanel(QWidget):
         self.state_label = QLabel("Idle")
         self.state_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.state_label, 5, 0, 1, 2)
+        status_layout.addWidget(QLabel("Battery (meter):"), 6, 0)
+        self.meter_voltage_label = QLabel("--")
+        status_layout.addWidget(self.meter_voltage_label, 6, 1)
         layout.addWidget(status_group)
 
         layout.addStretch()
@@ -451,6 +454,10 @@ class DP832AChargerPanel(QWidget):
             self.timeout_spin.setValue(data.get("timeout_hours", 8))
         finally:
             self._loading_settings = False
+
+    def set_meter_voltage(self, voltage_v: float) -> None:
+        """Show the independent meter's battery-terminal voltage (from MainWindow)."""
+        self.meter_voltage_label.setText(f"{voltage_v:.3f} V")
 
     # --- app shutdown ---
 
