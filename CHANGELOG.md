@@ -28,7 +28,7 @@ Changes prior to this file's introduction are recorded in the git history.
 - Design documents: Prefect evaluation (verdict: not now, criteria recorded)
   and the job engine design spec + staged implementation plan under
   `docs/superpowers/`
-- ~110 new tests (schema migrations, job model/ledger, device fakes,
+- 129 new tests (schema migrations, job model/ledger, device fakes,
   recovery, SCPI transport, phase cores/shells, safety, executor, facade)
 
 - **Battery Charging tab** — charge batteries from a Rigol DP832A bench power

@@ -116,3 +116,19 @@ class TestSafetySupervisor:
         supervisor.observe_psu(PsuStatus(current_a=3.0), now_s=1.0)
         assert supervisor.tripped is True
         assert len(reasons) == 1
+
+    def test_forget_psu_prevents_false_stale_trip(self):
+        """I4 regression: a deliberate disconnect must not leave stored
+        status behind for check_stale to trip on later."""
+        supervisor, _ = self.make(stale_status_timeout_s=10.0)
+        supervisor.observe_psu(PsuStatus(current_a=1.0, output_on=True), now_s=0.0)
+        supervisor.forget_psu()
+        supervisor.check_stale(now_s=1000.0)
+        assert supervisor.tripped is False
+
+    def test_forget_load_prevents_false_stale_trip(self):
+        supervisor, _ = self.make(stale_status_timeout_s=10.0)
+        supervisor.observe_load(LoadStatus(load_on=True), now_s=0.0)
+        supervisor.forget_load()
+        supervisor.check_stale(now_s=1000.0)
+        assert supervisor.tripped is False

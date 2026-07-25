@@ -10,6 +10,7 @@ engine thread in production. Snapshot callbacks also fire there; the GUI
 bridge marshals them onto the Qt thread.
 """
 
+import sys
 import threading
 import time
 from datetime import datetime
@@ -114,6 +115,10 @@ class JobExecutor:
                 self._safety_handled = False
 
         if self._job_id is None:
+            if self._supervisor is not None and self._supervisor.tripped:
+                # Latch also blocks queued-job pickup, not just submission -
+                # a PENDING job must not silently start while tripped.
+                return
             self._maybe_start_next(now_s)
             return
         if self._abort_reason is not None:
@@ -186,6 +191,11 @@ class JobExecutor:
         self._job_started_s = now_s
         self._last_heartbeat_s = now_s
         self._last_reading_s = -1.0
+        # A job that ended while paused/stop-requested must not leak those
+        # control flags into the next job (it would silently self-pause or
+        # self-stop on the very next tick).
+        self._pause_requested = False
+        self._stop_requested = False
         self._ledger.mark_job_running(job_id)
         self._enter_current_phase(now_s)
 
@@ -377,6 +387,11 @@ class JobEngine:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
         self._thread = None
+        # Deterministic outputs-off at exit: the engine thread is joined (or
+        # never started), so the executor is guaranteed thread-free here -
+        # run one final synchronous step to consume any pending stop/abort
+        # and make hardware safe before the process exits.
+        self._executor.step(time.monotonic())
 
     def wake(self) -> None:
         self._wake.set()
@@ -402,9 +417,10 @@ class JobEngine:
         while self._running:
             try:
                 self._executor.step(time.monotonic())
-            except Exception:
+            except Exception as e:
                 # The engine thread must never die; executor faults are
-                # handled internally - this catches only genuine bugs.
-                pass
+                # handled internally - this catches only genuine bugs, but
+                # leave a diagnostic trail instead of swallowing silently.
+                print(f"JobEngine step failed: {e!r}", file=sys.stderr)
             self._wake.wait(self.TICK_INTERVAL_S)
             self._wake.clear()

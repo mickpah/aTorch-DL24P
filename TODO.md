@@ -46,6 +46,10 @@ The v1 "Battery Charging" tab is manual charge control only. Deferred:
   - Consider backwards compatibility for existing JSON test files
   - Document parameter naming conventions in CLAUDE.md
 
+### Job Engine follow-ups
+- Safety-trip push notifications via alerts/notifier (spec §5.5 step 4 — currently GUI banner only)
+- TimedPhase: re-arm the device hardware timer as a device-side backstop (old TestRunner used set_timer)
+
 ---
 
 ## Known Issues

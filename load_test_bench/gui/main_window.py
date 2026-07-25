@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
     error_occurred = Signal(str)  # error message
     prepare_needed = Signal()  # device needs USB prepare (no response detected)
     recovery_safe_result = Signal(str)  # startup make-safe outcome for the statusbar
+    test_completed = Signal(object)  # marshal job-engine test completion onto the GUI thread
 
     DEBUG_LOG_FILE = str(Path(__file__).resolve().parents[2] / "debug.log")
 
@@ -183,7 +184,8 @@ class MainWindow(QMainWindow):
         # Compatibility facade - created ONCE; device assigned on connect
         self.test_runner = TestRunner(None, self.database, self.job_engine)
         self.test_runner.set_progress_callback(self._on_test_progress)
-        self.test_runner.set_complete_callback(self._on_test_complete)
+        self.test_runner.set_complete_callback(self.test_completed.emit)
+        self.test_completed.connect(self._on_test_complete)
         self.control_panel.test_runner = self.test_runner
         self.battery_capacity_panel.test_runner = self.test_runner
         self.power_bank_panel.test_runner = self.test_runner
@@ -872,6 +874,10 @@ class MainWindow(QMainWindow):
             self.device.turn_off()
             self.control_panel.power_switch.setChecked(False)
             self.control_panel._update_power_labels(False)
+        # Load is already off (above) - this is a deliberate disconnect, not
+        # a fault, so forget the stored status rather than let the stale
+        # watchdog trip on it later.
+        self.safety_supervisor.forget_load()
 
         # Stop logging if active
         if self._test_logging:
@@ -4310,6 +4316,7 @@ class MainWindow(QMainWindow):
         except Exception:
             data = {}
         config = SafetyConfig()
+        nullable_keys = ("ext_temp_max_c", "psu_current_max_a")
         for key in (
             "mosfet_temp_max_c",
             "ext_temp_max_c",
@@ -4317,8 +4324,18 @@ class MainWindow(QMainWindow):
             "stale_status_timeout_s",
             "temp_hysteresis_c",
         ):
-            if key in data:
-                setattr(config, key, data[key])
+            if key not in data:
+                continue
+            value = data[key]
+            # A malformed settings.json (wrong type) must never produce a
+            # config that makes evaluate_load/evaluate_psu raise - ignore
+            # the key instead of applying it.
+            if isinstance(value, bool):
+                continue  # bool is a subclass of int - reject explicitly
+            if isinstance(value, (int, float)):
+                setattr(config, key, value)
+            elif value is None and key in nullable_keys:
+                setattr(config, key, None)
         return config
 
     def _enqueue_job_reading(self, session_id: int, reading) -> None:
@@ -4372,6 +4389,12 @@ class MainWindow(QMainWindow):
             self._current_session.end_time = datetime.now()
             self.database.update_session(self._current_session)
 
+        # Shut down the job engine BEFORE the background writer threads so a
+        # final reading enqueued during its deterministic make-safe step is
+        # still consumed rather than dropped into a dead queue.
+        self.job_engine.shutdown()
+        self.dp832a_charger_panel.shutdown()
+
         # Stop background writer threads
         self._debug_writer_running = False
         self._db_writer_running = False
@@ -4382,9 +4405,6 @@ class MainWindow(QMainWindow):
             self._db_writer_thread.join(timeout=2.0)
         except:
             pass
-
-        self.job_engine.shutdown()
-        self.dp832a_charger_panel.shutdown()
 
         if self.device:
             self.device.disconnect()

@@ -7,7 +7,7 @@ import pytest
 
 from load_test_bench.data.database import Database
 from load_test_bench.jobs.devices import DeviceRegistry
-from load_test_bench.jobs.engine import JobExecutor
+from load_test_bench.jobs.engine import JobEngine, JobExecutor
 from load_test_bench.jobs.ledger import JobLedger
 from load_test_bench.jobs.model import JobSpec, PhaseSpec
 from load_test_bench.jobs.safety import SafetyConfig, SafetyRules, SafetySupervisor
@@ -177,6 +177,25 @@ class TestControl:
         assert job["state"] == "FAULTED"
         assert "failed to start" in job["fault_reason"]
 
+    def test_pause_then_stop_does_not_leak_into_next_job(self, harness):
+        """C1 regression: a job that ends while paused must not leave
+        _pause_requested set - the next job would silently self-pause and
+        turn the load back off on its very next tick."""
+        job1 = harness.executor.submit(discharge_spec())
+        harness.run(0.0, 1.0)
+        harness.executor.pause()
+        harness.run(2.0, 2.0)
+        assert harness.ledger.get_job(job1)["state"] == "PAUSED"
+        harness.executor.stop()
+        harness.run(3.0, 3.0)
+        assert harness.ledger.get_job(job1)["state"] == "STOPPED"
+
+        job2 = harness.executor.submit(discharge_spec())
+        harness.run(4.0, 8.0)
+        job2_row = harness.ledger.get_job(job2)
+        assert job2_row["state"] == "RUNNING"
+        assert harness.load.on is True
+
 
 class TestSafetyIntegration:
     def make_supervised(self, tmp_path):
@@ -224,3 +243,37 @@ class TestSafetyIntegration:
             assert harness.load.calls.count(("turn_off",)) == off_count
         finally:
             harness.close()
+
+    def test_tripped_before_first_step_blocks_queued_pickup(self, tmp_path):
+        """C2 regression: the latch must block a PENDING job from starting
+        on step(), not just refuse new submissions."""
+        harness, supervisor = self.make_supervised(tmp_path)
+        try:
+            job_id = harness.executor.submit(discharge_spec())
+            supervisor.observe_load(LoadStatus(mosfet_temp_c=95), now_s=0.5)
+            assert supervisor.tripped is True
+            harness.run(1.0, 4.0)
+            job = harness.ledger.get_job(job_id)
+            assert job["state"] == "PENDING"
+            assert harness.load.on is False
+            assert harness.load.calls.count(("turn_on",)) == 0
+        finally:
+            harness.close()
+
+
+class TestEngineShutdown:
+    def test_shutdown_processes_pending_stop_deterministically(self, harness):
+        """I3 regression: JobEngine.shutdown() must consume a pending stop
+        and make hardware safe even if the engine thread was never started
+        and no step() was called after stop()."""
+        job_id = harness.executor.submit(discharge_spec())
+        harness.executor.step(0.0)  # picks up the job -> RUNNING, load on
+        assert harness.ledger.get_job(job_id)["state"] == "RUNNING"
+        assert harness.load.on is True
+
+        harness.executor.stop()  # request stop, but don't step
+        engine = JobEngine(harness.executor)  # thread never started
+        engine.shutdown()
+
+        assert harness.ledger.get_job(job_id)["state"] == "STOPPED"
+        assert harness.load.on is False

@@ -126,6 +126,7 @@ class DischargePhase(Phase):
         ok = load.reset_counters()
         ctx.settle(0.5)
         ok = load.set_current(self._current_a) and ok
+        ctx.settle(0.5)
         ok = load.set_voltage_cutoff(self._voltage_cutoff) and ok
         ctx.settle(0.5)
         ok = load.turn_on() and ok
@@ -201,6 +202,7 @@ class TimedPhase(Phase):
         ctx.settle(0.5)
         ok = load.set_current(self._current_a) and ok
         if self._voltage_cutoff is not None:
+            ctx.settle(0.5)
             ok = load.set_voltage_cutoff(self._voltage_cutoff) and ok
         ctx.settle(0.5)
         ok = load.turn_on() and ok

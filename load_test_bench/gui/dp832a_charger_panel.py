@@ -192,6 +192,10 @@ class DP832AChargerPanel(QWidget):
             self._output_off_retry_timer.stop()
             if self._registry is not None:
                 self._registry.unregister("psu")
+            if self._supervisor is not None:
+                # Deliberate disconnect, not a fault - forget the status so
+                # the stale watchdog has nothing to trip on later.
+                self._supervisor.forget_psu()
             self.charger.disconnect()
             self._set_connected_ui(False)
             return
@@ -470,4 +474,6 @@ class DP832AChargerPanel(QWidget):
                     time.sleep(0.5)
         if self._registry is not None:
             self._registry.unregister("psu")
+        if self._supervisor is not None:
+            self._supervisor.forget_psu()
         self.charger.disconnect()

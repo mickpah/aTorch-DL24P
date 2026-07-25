@@ -147,6 +147,20 @@ class SafetySupervisor:
                 trips.append(Trip("psu_status_stale", "psu status stale while output on"))
         self._latch(trips)
 
+    def forget_load(self) -> None:
+        """Clear stored load status/timestamp so check_stale has nothing to
+        trip on - used for deliberate disconnects, not faults."""
+        with self._lock:
+            self._load_status = None
+            self._load_seen_s = None
+
+    def forget_psu(self) -> None:
+        """Clear stored PSU status/timestamp so check_stale has nothing to
+        trip on - used for deliberate disconnects, not faults."""
+        with self._lock:
+            self._psu_status = None
+            self._psu_seen_s = None
+
     def try_reset(self) -> bool:
         """Clear the latch - only when every rule currently evaluates clear."""
         with self._lock:
@@ -168,13 +182,15 @@ class SafetySupervisor:
         if not trips:
             return
         fire = False
+        reason = None
         with self._lock:
             if not self._tripped:
                 self._tripped = True
                 self._trip_reason = "; ".join(trip.message for trip in trips)
+                reason = self._trip_reason
                 fire = True
         if fire and self._on_trip is not None:
             try:
-                self._on_trip(self._trip_reason)
+                self._on_trip(reason)
             except Exception:
                 pass
