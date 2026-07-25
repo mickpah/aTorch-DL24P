@@ -173,9 +173,11 @@ def load_meter_settings(settings_path) -> MeterSettings:
             stored = json.load(f).get("meter", {})
     except (OSError, json.JSONDecodeError):
         return defaults
+    if not isinstance(stored, dict):
+        return defaults
     merged = {**asdict(defaults), **stored}
     # Only keep known fields so a stale/foreign key can't break construction.
-    known = {f: merged[f] for f in asdict(defaults) if f in merged}
+    known = {name: merged[name] for name in asdict(defaults) if name in merged}
     return MeterSettings(**known)
 
 

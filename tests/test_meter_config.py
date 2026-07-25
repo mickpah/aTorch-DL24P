@@ -47,3 +47,9 @@ class TestMeterSettings:
         loaded = load_meter_settings(path)
         assert loaded.enabled is True
         assert loaded.transport == "usb"  # default preserved
+
+    def test_non_dict_meter_value_returns_defaults(self, tmp_path):
+        """A malformed (non-dict) 'meter' value must not crash startup."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"meter": "oops"}))
+        assert load_meter_settings(path) == MeterSettings()
