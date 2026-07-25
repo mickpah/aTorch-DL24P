@@ -69,6 +69,61 @@ class LanScpiLink:
         return self._sock.recv(max_bytes)
 
 
+class UsbScpiLink:
+    """SCPI over a USB CDC serial port (e.g. OWON HDS200, appears as a serial
+    device). Uses pyserial. A pre-opened serial-like object may be injected
+    for tests; open() is then a no-op.
+    """
+
+    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 2.0, serial_obj=None) -> None:
+        self._port = port
+        self._baudrate = baudrate
+        self._timeout = timeout
+        self._serial = serial_obj
+
+    def open(self) -> None:
+        if self._serial is None:
+            import serial  # lazy: pyserial is a dependency but keep import local
+            self._serial = serial.Serial(
+                self._port, self._baudrate, timeout=self._timeout
+            )
+
+    def close(self) -> None:
+        if self._serial is not None:
+            try:
+                self._serial.close()
+            except OSError:
+                pass
+        self._serial = None
+
+    def send(self, data: bytes) -> None:
+        if self._serial is None:
+            raise OSError("Serial link not open")
+        self._serial.write(data)
+
+    def recv(self, max_bytes: int) -> bytes:
+        if self._serial is None:
+            raise OSError("Serial link not open")
+        # Return buffered bytes immediately; otherwise block for one byte up to
+        # the timeout so a short reply doesn't wait the full read() timeout.
+        waiting = getattr(self._serial, "in_waiting", 0)
+        if waiting:
+            return self._serial.read(min(waiting, max_bytes))
+        one = self._serial.read(1)
+        if not one:
+            raise OSError("Serial read timed out")
+        return one
+
+
+def list_serial_ports() -> list:
+    """Available serial ports as (device, description) pairs (for the meter UI)."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    return [(p.device, p.description) for p in list_ports.comports()]
+
+
 class ScpiTransport:
     POLL_INTERVAL = 1.0  # seconds
     LOCK_TIMEOUT = 1.0  # seconds; GUI commands must never block longer
