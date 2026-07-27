@@ -231,7 +231,8 @@ load-test-bench/
 │   ├── data/             # Database and export
 │   ├── automation/       # Test profiles and runner
 │   └── alerts/           # Notifications
-├── tests/                # Unit tests (152 tests)
+├── jobs/                 # Durable job engine (Qt-free)
+├── tests/                # Unit tests (327 tests)
 ├── resources/            # Battery presets, icons
 │   ├── battery_capacity/ # Camera and household battery presets
 │   ├── power_bank/       # Power bank presets
@@ -250,14 +251,18 @@ uv run --extra dev pytest -v                       # Verbose output
 uv run --extra dev pytest tests/test_protocol.py   # Specific test file
 ```
 
-**Test Coverage:** 152 tests across 9 test files:
+**Test Coverage:** 327 tests across 25 test files:
 - Protocol encoding/decoding
-- Database operations
+- Database operations and schema migrations
 - Test profiles and serialization
 - Alert conditions
 - CSV/JSON export
 - PX100 protocol (legacy)
 - DP832A SCPI protocol, LAN driver, and charge termination state machine
+- Job engine: phase decision cores, phase shells, executor, ledger, recovery, safety
+- SCPI transport (LAN/USB), meter profiles, and the SCPI voltage meter driver
+
+See CLAUDE.md for the per-file breakdown.
 
 ## Cross-Platform Compatibility
 
